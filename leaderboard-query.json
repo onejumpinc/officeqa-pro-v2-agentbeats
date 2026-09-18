@@ -1,0 +1,6 @@
+[
+  {
+    "name": "Overall Performance",
+    "query": "SELECT id, ROUND(pass_rate, 2) AS \"Pass Rate\", ROUND(time_used, 1) AS \"Time\", total_tasks AS \"# Questions\" FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY id ORDER BY pass_rate DESC, time_used ASC) AS rn FROM (SELECT results.participants.agent AS id, (SELECT 100.0 * SUM(res.score) / NULLIF(SUM(res.max_score), 0) FROM UNNEST(results.results) AS r(res)) AS pass_rate, (SELECT SUM(res.time_used) FROM UNNEST(results.results) AS r(res)) AS time_used, (SELECT SUM(res.max_score) FROM UNNEST(results.results) AS r(res)) AS total_tasks FROM results)) WHERE rn = 1 ORDER BY \"Pass Rate\" DESC, \"Time\" ASC;"
+  }
+]

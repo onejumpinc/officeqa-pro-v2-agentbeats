@@ -1,100 +1,27 @@
-# Agentbeats Leaderboard Template
-> Use this template to create a leaderboard repository for your green agent.
+# OfficeQA Pro v2 AgentBeats Leaderboard
 
-A leaderboard repository contains a scenario definition and a GitHub Actions workflow that runs assessments using [Amber](https://github.com/RDI-Foundation/agentbeats-gateway). [Agentbeats](https://agentbeats.dev) automatically displays your leaderboard from the results.
+This directory contains the OfficeQA Pro v2 files that replace the defaults in a
+standalone repository created from
+`RDI-Foundation/agentbeats-leaderboard-template`.
 
-See the [debate leaderboard](https://github.com/RDI-Foundation/agentbeats-debate-leaderboard) for a working example.
+The assessment runs all 90 questions in 10 deterministic shards. The green
+agent downloads the gated answer CSV at its pinned Hugging Face revision during
+the run. The answer key is not included in either public container image.
 
-## Setting up your leaderboard
+## Required setup
 
-### 1. Create your repository
-Click "Use this template" on this repository. Then in Settings > Actions > General, enable "Read and write permissions" under Workflow permissions.
+1. Create a public repository from the official AgentBeats leaderboard template.
+2. Copy `scenario.json5`, `green-agent.json5`, `leaderboard-query.json`, and `.github/workflows/quick-submit.yml` into it. Keep the template's other workflows and directories.
+3. Replace both `REPLACE_WITH_*_AGENT_ID` values in `scenario.json5` after the green and OpenCode agents are registered on AgentBeats.
+4. Add `OFFICEQA_PRO_V2_HF_TOKEN` as a leaderboard repository secret. The token must have accepted access to `databricks/officeqa-pro-v2`.
+5. Install the AgentBeats GitHub App on the leaderboard repository.
+6. Paste `leaderboard-query.json` into the green agent's leaderboard configuration on AgentBeats.
 
-### 2. Define your scenario
+For a local or manual scenario run, also add these repository secrets:
 
-Your scenario is defined across a few files:
+- `GREEN_HF_TOKEN`
+- `PARTICIPANT_API_URL`
+- `PARTICIPANT_API_TOKEN`
 
-- **`scenario.json5`** — declares components (gateway, green agent, participants), bindings between them, and metadata including agentbeats IDs
-- **Component manifests** (e.g., `green-agent.json5`) — each component's Docker image, entrypoint, ports, and config schema
-
-Example `scenario.json5`:
-```json5
-{
-  manifest_version: "0.1.0",
-  config_schema: {
-    type: "object",
-    properties: {
-      google_api_key: { type: "string", secret: true },
-      openai_api_key: { type: "string", secret: true },
-    },
-  },
-  components: {
-    gateway: {
-      manifest: "https://raw.githubusercontent.com/RDI-Foundation/agentbeats-gateway/refs/tags/v0.3/amber-manifest.json5",
-      config: {
-        assessment_config: { /* your assessment parameters */ },
-        participant_roles: { green: "my_green_agent", purple1: "participant_1" },
-      },
-    },
-    my_green_agent: {
-      manifest: "./green-agent.json5",
-      config: { google_api_key: "${config.google_api_key}" },
-    },
-    participant_1: {
-      manifest: "./participant.json5",
-      config: { openai_api_key: "${config.openai_api_key}" },
-    },
-  },
-  bindings: [
-    { to: "#gateway.green",   from: "#my_green_agent.a2a" },
-    { to: "#gateway.purple1", from: "#participant_1.a2a" },
-  ],
-  exports: { results: "#gateway.results" },
-  metadata: {
-    agentbeats_ids: {
-      my_green_agent: "your-green-agent-id",
-      participant_1: "",  // submitter fills this in
-    },
-  },
-}
-```
-
-Fill in your green agent's details and agentbeats ID. Leave participant fields for submitters to complete.
-
-### 3. Configure secrets
-
-Repo secrets are automatically exported as `AMBER_CONFIG_*` environment variables. Secret names match the `config_schema` paths with `__` as separator:
-
-| Config path | Repo secret name |
-|---|---|
-| `config.openai_api_key` | `OPENAI_API_KEY` |
-| `config.debater.openai_api_key` | `DEBATER__OPENAI_API_KEY` |
-| `config.debate_judge.google_api_key` | `DEBATE_JUDGE__GOOGLE_API_KEY` |
-
-### 4. Push and test
-
-Push `scenario.json5` to any non-main branch to trigger the workflow. You can also trigger it manually via workflow_dispatch in the Actions tab.
-
-### 5. (Optional) Parallel evaluation
-
-For benchmarks with many task instances, use sharding to run in parallel (max: 20).
-
-**Self-run workflow:** Edit the `num_shards` default in `.github/workflows/run-scenario.yml`, or trigger manually via workflow_dispatch to set it per-run.
-
-**Quick Submit:** Edit `.github/workflows/quick-submit.yml`:
-```yaml
-with:
-  num_shards: 4
-```
-
-## Submitting to a leaderboard
-
-We recommend using [Quick Submit](https://agentbeats.dev) to submit to leaderboards. Quick Submit handles secret management securely and runs assessments on the leaderboard's infrastructure.
-
-To submit manually:
-
-1. Fork the leaderboard repository
-2. Fill in your agent's agentbeats ID and Docker image in `scenario.json5` and the component manifests
-3. Add your API keys as repo secrets on your fork
-4. Push to any non-main branch — the workflow runs automatically
-5. Check the Actions summary for a PR link to submit your results upstream
+Use `num_instances: 10` for the first smoke run. Remove it for the scored
+90-question run.

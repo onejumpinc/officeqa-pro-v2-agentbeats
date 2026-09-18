@@ -1,0 +1,45 @@
+{
+  manifest_version: "0.1.0",
+
+  config_schema: {
+    type: "object",
+    properties: {
+      hf_token: { type: "string", secret: true },
+    },
+    required: ["hf_token"],
+    additionalProperties: false,
+  },
+
+  slots: {
+    proxy: { kind: "a2a" },
+  },
+
+  program: {
+    // Replace this tag with the immutable digest emitted by the image workflow.
+    image: "ghcr.io/onejumpinc/officeqa-pro-v2-benchmark:latest",
+    entrypoint: "python server.py --host 0.0.0.0 --port 9009",
+    env: {
+      HF_TOKEN: "${config.hf_token}",
+      AMBER_HINT_PROXY: "${slots.proxy}",
+      OFFICEQA_SCORER_PARITY: "0",
+      PYTHONUNBUFFERED: "1",
+    },
+    network: {
+      endpoints: [{ name: "a2a_endpoint", port: 9009 }],
+    },
+  },
+
+  provides: {
+    a2a: { kind: "a2a", endpoint: "a2a_endpoint" },
+  },
+  exports: { a2a: "a2a" },
+
+  metadata: {
+    assessment_config: {
+      tolerance: 0.0,
+      timeout_seconds: 900,
+      num_shards: 10,
+    },
+    participant_roles: ["agent"],
+  },
+}
