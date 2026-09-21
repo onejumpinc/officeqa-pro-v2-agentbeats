@@ -373,5 +373,10 @@ def test_public_workflows_gate_before_any_result_write() -> None:
 
 def test_quick_submit_calls_repository_owned_runner() -> None:
     workflow = (ROOT / ".github/workflows/quick-submit.yml").read_text()
-    assert "uses: ./.github/workflows/quick-submit-runner.yml" in workflow
+    assert (
+        "uses: onejumpinc/officeqa-pro-v2-agentbeats/"
+        ".github/workflows/quick-submit-runner.yml@"
+        "cc81672a303f0827aff1408eb31257f81e64f206"
+    ) in workflow
+    assert "uses: ./.github/workflows/quick-submit-runner.yml" not in workflow
     assert "RDI-Foundation/agentbeats-leaderboard-template" not in workflow

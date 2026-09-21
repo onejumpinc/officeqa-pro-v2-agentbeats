@@ -8,7 +8,7 @@ on:
 jobs:
   run-scenario:
     if: startsWith(github.head_ref, 'quick-submit-')
-    uses: ./.github/workflows/quick-submit-runner.yml
+    uses: onejumpinc/officeqa-pro-v2-agentbeats/.github/workflows/quick-submit-runner.yml@cc81672a303f0827aff1408eb31257f81e64f206
     permissions:
       id-token: write
       contents: write

@@ -18,8 +18,8 @@ digests. A smoke or partial run cannot pass this gate.
 
 1. Create a public repository from the official AgentBeats leaderboard template.
 2. Keep the repository-owned workflows and `tools/` verifier files together;
-   `quick-submit.yml` intentionally calls the local reusable runner rather than
-   the mutable template runner.
+   `quick-submit.yml` intentionally calls the repository-owned reusable runner
+   at an immutable commit rather than the mutable template runner.
 3. Register the green agent using the immutable `green-agent.json5` URL, then
    replace `REPLACE_WITH_GREEN_AGENT_ID` in `scenario.json5`. The approved
    purple agent ID is already fixed in the scenario and verifier.
