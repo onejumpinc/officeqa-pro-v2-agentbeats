@@ -366,6 +366,9 @@ def test_public_workflows_gate_before_any_result_write() -> None:
     )
     assert quick_run.count("ref: ${{ github.event.pull_request.head.sha }}") == 3
     assert 'git push origin "HEAD:refs/heads/${GITHUB_HEAD_REF}"' in quick_run
+    assert "RELEASE_GATE_REF: 75f1d418ef25dcb6a49d55df567be93f68e3a9a7" in quick_run
+    assert quick_run.count(".release-gate/tools/verify_exact_result.py") == 2
+    assert ".release-gate/tools/fetch_pinned_dataset.py" in quick_run
 
 
 def test_quick_submit_calls_repository_owned_runner() -> None:

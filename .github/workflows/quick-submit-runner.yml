@@ -20,6 +20,7 @@ on:
         required: false
 
 env:
+  RELEASE_GATE_REF: 75f1d418ef25dcb6a49d55df567be93f68e3a9a7
   RELEASE_GATEWAY_MANIFEST: https://raw.githubusercontent.com/RDI-Foundation/agentbeats-gateway/ca6dd30904f98bfdfbff2f79fb035e854c93a8d3/amber-manifest.json5
   RELEASE_GATEWAY_MANIFEST_SHA256: 0ef4afd064263eaacddf0fc93bb735fffce999491b96b2dccebb573f3847c6f9
   RELEASE_GREEN_MANIFEST: https://raw.githubusercontent.com/onejumpinc/officeqa-pro-v2-agentbeats/9ac7f2c39d16e13b2e10ddb3f73c63cdc9d278ad/green-agent.json5
@@ -52,6 +53,15 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Checkout immutable release gate
+        uses: actions/checkout@v6
+        with:
+          repository: onejumpinc/officeqa-pro-v2-agentbeats
+          ref: ${{ env.RELEASE_GATE_REF }}
+          path: .release-gate
+          sparse-checkout: tools
+          persist-credentials: false
 
       - name: Resolve submission ID
         id: submission
@@ -112,7 +122,7 @@ jobs:
           SCENARIO_PATH: ${{ steps.scenario.outputs.path }}
         run: |
           set -euo pipefail
-          python3 tools/verify_exact_result.py scenario \
+          python3 .release-gate/tools/verify_exact_result.py scenario \
             --scenario "${SCENARIO_PATH}"
 
       - name: Verify immutable release manifests
@@ -628,6 +638,15 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
 
+      - name: Checkout immutable release gate
+        uses: actions/checkout@v6
+        with:
+          repository: onejumpinc/officeqa-pro-v2-agentbeats
+          ref: ${{ env.RELEASE_GATE_REF }}
+          path: .release-gate
+          sparse-checkout: tools
+          persist-credentials: false
+
       - name: Download all shard artifacts
         uses: actions/download-artifact@v8
         with:
@@ -727,14 +746,14 @@ jobs:
           hf_token="$(jq -er '.hf_token | select(type == "string" and length > 0)' \
             <<<"${GREEN_SECRETS_JSON}")"
           echo "::add-mask::${hf_token}"
-          HF_TOKEN="${hf_token}" python3 tools/fetch_pinned_dataset.py \
+          HF_TOKEN="${hf_token}" python3 .release-gate/tools/fetch_pinned_dataset.py \
             "${RUNNER_TEMP}/officeqa_pro_v2.csv"
 
       - name: Verify exact 90/90 release
         run: |
           set -euo pipefail
           source_sha=$(git rev-parse HEAD)
-          python3 tools/verify_exact_result.py result \
+          python3 .release-gate/tools/verify_exact_result.py result \
             --artifact results.json \
             --dataset "${RUNNER_TEMP}/officeqa_pro_v2.csv" \
             --provenance provenance.json \
