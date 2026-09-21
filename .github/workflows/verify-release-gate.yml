@@ -1,0 +1,55 @@
+name: Verify Release Gate
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - 'scenario.json5'
+      - 'green-agent.json5'
+      - 'tools/**'
+      - 'tests/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - 'scenario.json5'
+      - 'green-agent.json5'
+      - 'tools/**'
+      - 'tests/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install pinned verification tools
+        run: |
+          set -euo pipefail
+          python3 -m venv "${RUNNER_TEMP}/release-gate-venv"
+          "${RUNNER_TEMP}/release-gate-venv/bin/pip" install \
+            --disable-pip-version-check \
+            pytest==9.1.1 \
+            PyYAML==6.0.3 \
+            ruff==0.16.8
+
+      - name: Run verifier tests and lint
+        run: |
+          set -euo pipefail
+          venv_bin="${RUNNER_TEMP}/release-gate-venv/bin"
+          "$venv_bin/python" -m pytest -q
+          "$venv_bin/ruff" check tools tests
+          "$venv_bin/ruff" format --check tools tests
+          "$venv_bin/python" - <<'PY'
+          from pathlib import Path
+
+          import yaml
+
+          for path in sorted(Path('.github/workflows').glob('*.yml')):
+              yaml.safe_load(path.read_text())
+              print(f'YAML OK: {path}')
+          PY

@@ -1,0 +1,9 @@
+# Release-control files and leaderboard evidence require repository-owner review.
+/.github/workflows/ @onejumpinc
+/tools/ @onejumpinc
+/tests/ @onejumpinc
+/scenario.json5 @onejumpinc
+/green-agent.json5 @onejumpinc
+/leaderboard-query.json @onejumpinc
+/results/ @onejumpinc
+/submissions/ @onejumpinc

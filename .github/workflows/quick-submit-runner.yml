@@ -1,6 +1,4 @@
-# Reusable workflow - called from leaderboard repos via quick-submit.yml.
-# After making changes, move the tag so leaderboard repos using @v2 pick up the update:
-#   git tag -f v2 && git push origin v2 --force
+# Repository-owned reusable workflow for the exact OfficeQA Pro v2 release.
 
 name: Quick-Submit Amber Runner
 
@@ -13,13 +11,7 @@ on:
         type: string
       num_shards:
         description: >-
-          Soft default number of parallel shards. Used only when the submitted
-          scenario does not set assessment_config.num_shards. The submitter's
-          value takes precedence. Clamped to 20.
-        required: false
-        type: number
-      num_instances:
-        description: Total number of task instances to run across all shards (default all)
+          Must resolve to exactly 10 for the scored OfficeQA Pro v2 release.
         required: false
         type: number
     secrets:
@@ -27,9 +19,19 @@ on:
         description: Optional JSON object mapping green config key -> secret value.
         required: false
 
+env:
+  RELEASE_GATEWAY_MANIFEST: https://raw.githubusercontent.com/RDI-Foundation/agentbeats-gateway/ca6dd30904f98bfdfbff2f79fb035e854c93a8d3/amber-manifest.json5
+  RELEASE_GATEWAY_MANIFEST_SHA256: 0ef4afd064263eaacddf0fc93bb735fffce999491b96b2dccebb573f3847c6f9
+  RELEASE_GREEN_MANIFEST: https://raw.githubusercontent.com/onejumpinc/officeqa-pro-v2-agentbeats/9ac7f2c39d16e13b2e10ddb3f73c63cdc9d278ad/green-agent.json5
+  RELEASE_GREEN_MANIFEST_SHA256: 019d98d164d479c77724dda4c20809df0ad1229b97b097893d9a98909f577946
+  RELEASE_PURPLE_MANIFEST: https://raw.githubusercontent.com/onejumpinc/officeqa-agentbeats/d376c66f2be259674704ae4cc71df1fe3c9b54ce/amber-manifest.json5
+  RELEASE_PURPLE_MANIFEST_SHA256: 7175137be7a12305c47f0535f7ece1130dace1bc2537ebd0bcc849021579b4c5
+
 jobs:
   setup:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       num_shards: ${{ steps.config.outputs.num_shards }}
       shard_indices: ${{ steps.gen.outputs.shard_indices }}
@@ -37,9 +39,19 @@ jobs:
       scenario_base: ${{ steps.scenario.outputs.base }}
       submission_id: ${{ steps.submission.outputs.submission_id }}
     steps:
+      - name: Require same-repository quick-submit branch
+        env:
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          set -euo pipefail
+          if [[ "${HEAD_REPOSITORY}" != "${GITHUB_REPOSITORY}" ]]; then
+            echo "Quick Submit must use an AgentBeats branch in this repository" >&2
+            exit 1
+          fi
+
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.head_ref }}
+          ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Resolve submission ID
         id: submission
@@ -79,8 +91,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          GITHUB_MATRIX_CAP=20
-
           scenario_num_shards="$(jq -r '.components.gateway.config.assessment_config.num_shards' "${SCENARIO_PATH}")"
           if [[ "${scenario_num_shards}" != "null" ]]; then
             num_shards="${scenario_num_shards}"
@@ -90,17 +100,35 @@ jobs:
             num_shards=1
           fi
 
-          if ! [[ "${num_shards}" =~ ^[0-9]+$ ]] || [[ "${num_shards}" -lt 1 ]]; then
-            echo "Invalid num_shards: ${num_shards}" >&2
+          if [[ "${num_shards}" != "10" ]]; then
+            echo "Public OfficeQA Pro v2 results require exactly 10 shards; got ${num_shards}" >&2
             exit 1
           fi
 
-          if (( num_shards > GITHUB_MATRIX_CAP )); then
-            echo "Clamping num_shards from ${num_shards} to ${GITHUB_MATRIX_CAP} (GitHub matrix cap)" >&2
-            num_shards=${GITHUB_MATRIX_CAP}
-          fi
-
           echo "num_shards=${num_shards}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify exact full-release scenario
+        env:
+          SCENARIO_PATH: ${{ steps.scenario.outputs.path }}
+        run: |
+          set -euo pipefail
+          python3 tools/verify_exact_result.py scenario \
+            --scenario "${SCENARIO_PATH}"
+
+      - name: Verify immutable release manifests
+        run: |
+          set -euo pipefail
+          verify_manifest() {
+            local label="$1" url="$2" expected="$3" actual
+            actual=$(curl -fsSL --retry 3 "$url" | sha256sum | cut -d' ' -f1)
+            if [[ "$actual" != "$expected" ]]; then
+              echo "$label manifest SHA-256 mismatch: $actual" >&2
+              exit 1
+            fi
+          }
+          verify_manifest gateway "$RELEASE_GATEWAY_MANIFEST" "$RELEASE_GATEWAY_MANIFEST_SHA256"
+          verify_manifest green "$RELEASE_GREEN_MANIFEST" "$RELEASE_GREEN_MANIFEST_SHA256"
+          verify_manifest purple "$RELEASE_PURPLE_MANIFEST" "$RELEASE_PURPLE_MANIFEST_SHA256"
 
       - id: gen
         run: echo "shard_indices=$(seq 0 $(( ${{ steps.config.outputs.num_shards }} - 1 )) | jq -sc .)" >> "$GITHUB_OUTPUT"
@@ -117,6 +145,7 @@ jobs:
     permissions:
       id-token: write
       contents: read
+      packages: read
 
     env:
       NUM_SHARDS: ${{ needs.setup.outputs.num_shards }}
@@ -145,7 +174,15 @@ jobs:
 
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.head_ref }}
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Authenticate to GHCR
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "${GHCR_TOKEN}" | docker login ghcr.io \
+            --username "${GITHUB_ACTOR}" --password-stdin
 
       # Secrets (OIDC → backend → GCP KMS → decrypt).
       # Skipped when no backend is configured (e.g. test repos using GREEN_SECRETS_JSON).
@@ -239,33 +276,78 @@ jobs:
           const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
 
           const secrets = JSON.parse(plaintext.toString('utf8'));
-
-          // Export all secrets as env vars with AMBER_CONFIG_ prefix (green + participant secrets)
           const fs = require('fs');
           const envFile = process.env.GITHUB_ENV;
+          const keyPattern = /^[A-Za-z][A-Za-z0-9_]*$/;
+
+          if (!secrets || typeof secrets !== 'object' || Array.isArray(secrets)) {
+            throw new Error('decrypted secrets payload must be an object');
+          }
+          const greenSecrets = secrets.green ?? {};
+          const participants = secrets.participants ?? [];
+          if (!greenSecrets || typeof greenSecrets !== 'object' || Array.isArray(greenSecrets)) {
+            throw new Error('decrypted green secrets must be an object');
+          }
+          if (!Array.isArray(participants)) {
+            throw new Error('decrypted participants secrets must be an array');
+          }
+
+          function appendEnv(name, value) {
+            let delimiter;
+            do {
+              delimiter = `__AGENTBEATS_${crypto.randomUUID()}__`;
+            } while (value.includes(delimiter));
+            fs.appendFileSync(envFile, `${name}<<${delimiter}\n${value}\n${delimiter}\n`);
+          }
 
           function exportSecret(key, value) {
+            if (!keyPattern.test(key)) {
+              throw new Error(
+                `invalid secret environment key ${JSON.stringify(key)}; ` +
+                'expected ^[A-Za-z][A-Za-z0-9_]*$'
+              );
+            }
+            if (typeof value !== 'string') {
+              throw new Error(`secret ${key} must be a string`);
+            }
+            if (/[\r\n\0]/.test(value)) {
+              throw new Error(`secret ${key} must not contain CR, LF, or NUL characters`);
+            }
             console.log(`::add-mask::${value}`);
-            fs.appendFileSync(envFile, `AMBER_CONFIG_${key}=${value}\n`);
+            appendEnv(`AMBER_CONFIG_${key.toUpperCase()}`, value);
           }
 
-          for (const [key, value] of Object.entries(secrets.green || {})) {
+          for (const [key, value] of Object.entries(greenSecrets)) {
             exportSecret(`GREEN_${key}`, value);
           }
-          for (const participant of secrets.participants || []) {
-            const prefix = participant.name.toUpperCase();
-            for (const [key, value] of Object.entries(participant.secrets || {})) {
+          for (const participant of participants) {
+            if (!participant || typeof participant !== 'object' || Array.isArray(participant)) {
+              throw new Error('participant secret entry must be an object');
+            }
+            if (typeof participant.name !== 'string' || !keyPattern.test(participant.name)) {
+              throw new Error('participant secret name is invalid');
+            }
+            const participantSecrets = participant.secrets ?? {};
+            if (
+              !participantSecrets ||
+              typeof participantSecrets !== 'object' ||
+              Array.isArray(participantSecrets)
+            ) {
+              throw new Error(`participant ${participant.name} secrets must be an object`);
+            }
+            const prefix = participant.name;
+            for (const [key, value] of Object.entries(participantSecrets)) {
               exportSecret(`${prefix}_${key}`, value);
             }
           }
-          const greenKeys = Object.keys(secrets.green || {})
+          const greenKeys = Object.keys(greenSecrets)
             .map((key) => key.toLowerCase())
             .sort();
           const outputFile = process.env.GITHUB_OUTPUT;
           fs.appendFileSync(outputFile, `green_keys_json=${JSON.stringify(greenKeys)}\n`);
 
-          console.log(`Exported ${Object.keys(secrets.green || {}).length} green secrets`);
-          console.log(`Exported secrets for ${(secrets.participants || []).length} participants`);
+          console.log(`Exported ${Object.keys(greenSecrets).length} green secrets`);
+          console.log(`Exported secrets for ${participants.length} participants`);
           NODE
 
       - name: Export repo-owned green secrets
@@ -304,7 +386,10 @@ jobs:
           const configKeyPattern = /^[a-z][a-z0-9_]*$/;
 
           function appendEnv(name, value) {
-            const delimiter = `__AGENTBEATS_${crypto.randomUUID()}__`;
+            let delimiter;
+            do {
+              delimiter = `__AGENTBEATS_${crypto.randomUUID()}__`;
+            } while (value.includes(delimiter));
             fs.appendFileSync(envFile, `${name}<<${delimiter}\n${value}\n${delimiter}\n`);
           }
 
@@ -349,11 +434,18 @@ jobs:
         run: |
           jq --argjson shard_index ${{ matrix.shard_index }} \
              --argjson num_shards ${NUM_SHARDS} \
-             --argjson num_instances '${{ inputs.num_instances || 'null' }}' \
+             --arg gateway_manifest "${RELEASE_GATEWAY_MANIFEST}" \
+             --arg green_manifest "${RELEASE_GREEN_MANIFEST}" \
+             --arg purple_manifest "${RELEASE_PURPLE_MANIFEST}" \
             '
+             .components.gateway.manifest = $gateway_manifest |
+             if .components.green then .components.green.manifest = $green_manifest
+             else .components.officeqa_pro_v2_green.manifest = $green_manifest end |
+             if .components.agent then .components.agent.manifest = $purple_manifest
+             else .components.opencode_agent.manifest = $purple_manifest end |
              .components.gateway.config.assessment_config.shard_index = $shard_index |
              .components.gateway.config.assessment_config.num_shards = $num_shards |
-             if $num_instances then .components.gateway.config.assessment_config.num_instances = $num_instances else . end
+             del(.components.gateway.config.assessment_config.num_instances)
             ' \
             "${{ needs.setup.outputs.scenario_path }}" > patched.json
           mv patched.json "${{ needs.setup.outputs.scenario_path }}"
@@ -416,6 +508,7 @@ jobs:
           done | jq -Rn '[inputs | split("\t") | {(.[0]): .[1]}] | add // {}')
           manifest_digests=$(jq '[.components[] | {(.moniker): .digest}] | add // {}' scenario-ir.json)
           timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          source_sha=$(git rev-parse HEAD)
           mkdir -p amber-compose/output
           jq -n \
             --argjson image_digests "$image_digests" \
@@ -423,13 +516,24 @@ jobs:
             --arg timestamp "$timestamp" \
             --arg run_url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             --arg ref "${{ github.ref }}" \
-            --arg sha "${{ github.sha }}" \
+            --arg sha "$source_sha" \
             --arg repository_url "${{ github.server_url }}/${{ github.repository }}" \
             --arg workflow_ref "${{ github.workflow_ref }}" \
             --arg workflow_sha "${{ github.workflow_sha }}" \
+            --arg gateway_manifest "${RELEASE_GATEWAY_MANIFEST}" \
+            --arg gateway_manifest_sha256 "${RELEASE_GATEWAY_MANIFEST_SHA256}" \
+            --arg green_manifest "${RELEASE_GREEN_MANIFEST}" \
+            --arg green_manifest_sha256 "${RELEASE_GREEN_MANIFEST_SHA256}" \
+            --arg purple_manifest "${RELEASE_PURPLE_MANIFEST}" \
+            --arg purple_manifest_sha256 "${RELEASE_PURPLE_MANIFEST_SHA256}" \
             '{
               image_digests: $image_digests,
               manifest_digests: $manifest_digests,
+              release_manifests: {
+                gateway: {url: $gateway_manifest, raw_sha256: $gateway_manifest_sha256},
+                green: {url: $green_manifest, raw_sha256: $green_manifest_sha256},
+                purple: {url: $purple_manifest, raw_sha256: $purple_manifest_sha256}
+              },
               timestamp: $timestamp,
               github_actions: {
                 run_url: $run_url,
@@ -522,7 +626,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.head_ref }}
+          ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Download all shard artifacts
         uses: actions/download-artifact@v8
@@ -577,6 +681,7 @@ jobs:
           done
           # image_digests and github_actions must be identical across shards
           expected_image_digests=$(jq '.image_digests' "${shard_provenance[0]}")
+          expected_release_manifests=$(jq '.release_manifests' "${shard_provenance[0]}")
           expected_github_actions=$(jq '.github_actions' "${shard_provenance[0]}")
           timestamps='[]'
           manifest_digests='[]'
@@ -584,6 +689,10 @@ jobs:
             got=$(jq '.image_digests' "$f")
             if [[ "$got" != "$expected_image_digests" ]]; then
               echo "ERROR: image_digests mismatch in $f" >&2; exit 1
+            fi
+            got=$(jq '.release_manifests' "$f")
+            if [[ "$got" != "$expected_release_manifests" ]]; then
+              echo "ERROR: release_manifests mismatch in $f" >&2; exit 1
             fi
             got=$(jq '.github_actions' "$f")
             if [[ "$got" != "$expected_github_actions" ]]; then
@@ -597,16 +706,42 @@ jobs:
           jq -n \
             --argjson image_digests "$expected_image_digests" \
             --argjson manifest_digests "$(echo "$manifest_digests" | jq '.[0]')" \
+            --argjson release_manifests "$expected_release_manifests" \
             --arg timestamp "$(echo "$timestamps" | jq -r '.[0]')" \
             --argjson github_actions "$expected_github_actions" \
             '{
               image_digests: $image_digests,
               manifest_digests: $manifest_digests,
+              release_manifests: $release_manifests,
               timestamp: $timestamp,
               github_actions: $github_actions
             }' > provenance.json
           echo "Provenance:"
           cat provenance.json
+
+      - name: Fetch pinned release dataset
+        env:
+          GREEN_SECRETS_JSON: ${{ secrets.GREEN_SECRETS_JSON }}
+        run: |
+          set -euo pipefail
+          hf_token="$(jq -er '.hf_token | select(type == "string" and length > 0)' \
+            <<<"${GREEN_SECRETS_JSON}")"
+          echo "::add-mask::${hf_token}"
+          HF_TOKEN="${hf_token}" python3 tools/fetch_pinned_dataset.py \
+            "${RUNNER_TEMP}/officeqa_pro_v2.csv"
+
+      - name: Verify exact 90/90 release
+        run: |
+          set -euo pipefail
+          source_sha=$(git rev-parse HEAD)
+          python3 tools/verify_exact_result.py result \
+            --artifact results.json \
+            --dataset "${RUNNER_TEMP}/officeqa_pro_v2.csv" \
+            --provenance provenance.json \
+            --scenario "${SCENARIO_PATH}" \
+            --expected-run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --expected-repository-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --expected-github-sha "$source_sha"
 
       - name: Commit results
         env:
@@ -619,7 +754,7 @@ jobs:
           mv provenance.json "submissions/${BASE}-provenance.json"
           git add "results/${BASE}.json" "submissions/${BASE}-provenance.json"
           git commit -m "[AgentBeats] Scenario results"
-          git push
+          git push origin "HEAD:refs/heads/${GITHUB_HEAD_REF}"
 
       # Cleanup: delete secrets from backend.
       # Skipped when no backend is configured.

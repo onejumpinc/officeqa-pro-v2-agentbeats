@@ -11,7 +11,7 @@ on:
     inputs:
       num_shards:
         description: "Number of parallel shards"
-        default: "1"
+        default: "10"
         type: string
       num_instances:
         description: "Total number of task instances to run across all shards (empty = all)"
@@ -19,7 +19,13 @@ on:
         type: string
 
 env:
-  NUM_SHARDS: ${{ inputs.num_shards || '1' }}
+  NUM_SHARDS: ${{ inputs.num_shards || '10' }}
+  RELEASE_GATEWAY_MANIFEST: https://raw.githubusercontent.com/RDI-Foundation/agentbeats-gateway/ca6dd30904f98bfdfbff2f79fb035e854c93a8d3/amber-manifest.json5
+  RELEASE_GATEWAY_MANIFEST_SHA256: 0ef4afd064263eaacddf0fc93bb735fffce999491b96b2dccebb573f3847c6f9
+  RELEASE_GREEN_MANIFEST: https://raw.githubusercontent.com/onejumpinc/officeqa-pro-v2-agentbeats/9ac7f2c39d16e13b2e10ddb3f73c63cdc9d278ad/green-agent.json5
+  RELEASE_GREEN_MANIFEST_SHA256: 019d98d164d479c77724dda4c20809df0ad1229b97b097893d9a98909f577946
+  RELEASE_PURPLE_MANIFEST: https://raw.githubusercontent.com/onejumpinc/officeqa-agentbeats/d376c66f2be259674704ae4cc71df1fe3c9b54ce/amber-manifest.json5
+  RELEASE_PURPLE_MANIFEST_SHA256: 7175137be7a12305c47f0535f7ece1130dace1bc2537ebd0bcc849021579b4c5
 
 jobs:
   setup:
@@ -30,9 +36,42 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Verify exact full-release scenario
+        env:
+          INPUT_NUM_SHARDS: ${{ inputs.num_shards || '10' }}
+          INPUT_NUM_INSTANCES: ${{ inputs.num_instances || '' }}
+        run: |
+          set -euo pipefail
+          if [[ "${INPUT_NUM_SHARDS}" != "10" ]]; then
+            echo "Public result workflows require exactly 10 shards" >&2
+            exit 1
+          fi
+          if [[ -n "${INPUT_NUM_INSTANCES}" ]]; then
+            echo "num_instances is forbidden for a scored public run" >&2
+            exit 1
+          fi
+          npx --yes json5@2.2.3 scenario.json5 > "${RUNNER_TEMP}/scenario.release.json"
+          python3 tools/verify_exact_result.py scenario \
+            --scenario "${RUNNER_TEMP}/scenario.release.json"
+
+      - name: Verify immutable release manifests
+        run: |
+          set -euo pipefail
+          verify_manifest() {
+            local label="$1" url="$2" expected="$3" actual
+            actual=$(curl -fsSL --retry 3 "$url" | sha256sum | cut -d' ' -f1)
+            if [[ "$actual" != "$expected" ]]; then
+              echo "$label manifest SHA-256 mismatch: $actual" >&2
+              exit 1
+            fi
+          }
+          verify_manifest gateway "$RELEASE_GATEWAY_MANIFEST" "$RELEASE_GATEWAY_MANIFEST_SHA256"
+          verify_manifest green "$RELEASE_GREEN_MANIFEST" "$RELEASE_GREEN_MANIFEST_SHA256"
+          verify_manifest purple "$RELEASE_PURPLE_MANIFEST" "$RELEASE_PURPLE_MANIFEST_SHA256"
+
       - name: Generate shard matrix
         id: gen
-        run: echo "shard_indices=$(seq 0 $(( ${{ inputs.num_shards || '1' }} - 1 )) | jq -sc .)" >> "$GITHUB_OUTPUT"
+        run: echo "shard_indices=$(seq 0 $(( ${{ inputs.num_shards || '10' }} - 1 )) | jq -sc .)" >> "$GITHUB_OUTPUT"
 
   eval:
     needs: setup
@@ -45,6 +84,7 @@ jobs:
 
     permissions:
       contents: read
+      packages: read
 
     env:
       AMBER_IMAGE: ghcr.io/rdi-foundation/amber-cli:v0.3
@@ -69,6 +109,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Authenticate to GHCR
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "${GHCR_TOKEN}" | docker login ghcr.io \
+            --username "${GITHUB_ACTOR}" --password-stdin
+
       - name: Export AMBER_CONFIG vars
         env:
           SECRETS_JSON: ${{ toJSON(secrets) }}
@@ -84,11 +132,17 @@ jobs:
 
       - name: Patch shard config into scenario
         run: |
-          npx json5 scenario.json5 | jq \
+          npx --yes json5@2.2.3 scenario.json5 | jq \
             --argjson shard_index ${{ matrix.shard_index }} \
             --argjson num_shards ${NUM_SHARDS} \
             --argjson num_instances '${{ inputs.num_instances || 'null' }}' \
+            --arg gateway_manifest "${RELEASE_GATEWAY_MANIFEST}" \
+            --arg green_manifest "${RELEASE_GREEN_MANIFEST}" \
+            --arg purple_manifest "${RELEASE_PURPLE_MANIFEST}" \
             '
+             .components.gateway.manifest = $gateway_manifest |
+             .components.officeqa_pro_v2_green.manifest = $green_manifest |
+             .components.opencode_agent.manifest = $purple_manifest |
              .components.gateway.config.assessment_config.shard_index = $shard_index |
              .components.gateway.config.assessment_config.num_shards = $num_shards |
              if $num_instances then .components.gateway.config.assessment_config.num_instances = $num_instances else . end
@@ -160,6 +214,7 @@ jobs:
           done | jq -Rn '[inputs | split("\t") | {(.[0]): .[1]}] | add // {}')
           manifest_digests=$(jq '[.components[] | {(.moniker): .digest}] | add // {}' scenario-ir.json)
           timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          source_sha=$(git rev-parse HEAD)
           mkdir -p "${AMBER_COMPOSE_DIR}/output"
           jq -n \
             --argjson image_digests "$image_digests" \
@@ -167,13 +222,24 @@ jobs:
             --arg timestamp "$timestamp" \
             --arg run_url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             --arg ref "${{ github.ref }}" \
-            --arg sha "${{ github.sha }}" \
+            --arg sha "$source_sha" \
             --arg repository_url "${{ github.server_url }}/${{ github.repository }}" \
             --arg workflow_ref "${{ github.workflow_ref }}" \
             --arg workflow_sha "${{ github.workflow_sha }}" \
+            --arg gateway_manifest "${RELEASE_GATEWAY_MANIFEST}" \
+            --arg gateway_manifest_sha256 "${RELEASE_GATEWAY_MANIFEST_SHA256}" \
+            --arg green_manifest "${RELEASE_GREEN_MANIFEST}" \
+            --arg green_manifest_sha256 "${RELEASE_GREEN_MANIFEST_SHA256}" \
+            --arg purple_manifest "${RELEASE_PURPLE_MANIFEST}" \
+            --arg purple_manifest_sha256 "${RELEASE_PURPLE_MANIFEST_SHA256}" \
             '{
               image_digests: $image_digests,
               manifest_digests: $manifest_digests,
+              release_manifests: {
+                gateway: {url: $gateway_manifest, raw_sha256: $gateway_manifest_sha256},
+                green: {url: $green_manifest, raw_sha256: $green_manifest_sha256},
+                purple: {url: $purple_manifest, raw_sha256: $purple_manifest_sha256}
+              },
               timestamp: $timestamp,
               github_actions: {
                 run_url: $run_url,
@@ -287,7 +353,7 @@ jobs:
             shard_results+=("$f")
           done
           # Extract participants (agentbeats IDs) from scenario
-          participants=$(npx json5 scenario.json5 | jq '.metadata.agentbeats_ids // {}')
+          participants=$(npx --yes json5@2.2.3 scenario.json5 | jq '.metadata.agentbeats_ids // {}')
           jq -s --argjson participants "$participants" '{
             status: (if all(.[]; .status == "completed") then "completed"
                     elif any(.[]; .status == "completed") then "partial"
@@ -311,6 +377,7 @@ jobs:
           done
           # image_digests and github_actions must be identical across shards
           expected_image_digests=$(jq '.image_digests' "${shard_provenance[0]}")
+          expected_release_manifests=$(jq '.release_manifests' "${shard_provenance[0]}")
           expected_github_actions=$(jq '.github_actions' "${shard_provenance[0]}")
           timestamps='[]'
           manifest_digests='[]'
@@ -318,6 +385,10 @@ jobs:
             got=$(jq '.image_digests' "$f")
             if [[ "$got" != "$expected_image_digests" ]]; then
               echo "ERROR: image_digests mismatch in $f" >&2; exit 1
+            fi
+            got=$(jq '.release_manifests' "$f")
+            if [[ "$got" != "$expected_release_manifests" ]]; then
+              echo "ERROR: release_manifests mismatch in $f" >&2; exit 1
             fi
             got=$(jq '.github_actions' "$f")
             if [[ "$got" != "$expected_github_actions" ]]; then
@@ -330,16 +401,40 @@ jobs:
           jq -n \
             --argjson image_digests "$expected_image_digests" \
             --argjson manifest_digests "$(echo "$manifest_digests" | jq '.[0]')" \
+            --argjson release_manifests "$expected_release_manifests" \
             --arg timestamp "$(echo "$timestamps" | jq -r '.[0]')" \
             --argjson github_actions "$expected_github_actions" \
             '{
               image_digests: $image_digests,
               manifest_digests: $manifest_digests,
+              release_manifests: $release_manifests,
               timestamp: $timestamp,
               github_actions: $github_actions
             }' > provenance.json
           echo "Provenance:"
           cat provenance.json
+
+      - name: Fetch pinned release dataset
+        env:
+          HF_TOKEN: ${{ secrets.GREEN_HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 tools/fetch_pinned_dataset.py \
+            "${RUNNER_TEMP}/officeqa_pro_v2.csv"
+
+      - name: Verify exact 90/90 release
+        run: |
+          set -euo pipefail
+          source_sha=$(git rev-parse HEAD)
+          npx --yes json5@2.2.3 scenario.json5 > "${RUNNER_TEMP}/scenario.release.json"
+          python3 tools/verify_exact_result.py result \
+            --artifact results.json \
+            --dataset "${RUNNER_TEMP}/officeqa_pro_v2.csv" \
+            --provenance provenance.json \
+            --scenario "${RUNNER_TEMP}/scenario.release.json" \
+            --expected-run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --expected-repository-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --expected-github-sha "$source_sha"
 
       - name: Generate submission metadata
         id: metadata

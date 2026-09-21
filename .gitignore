@@ -4,3 +4,7 @@ a2a-scenario.toml
 .env
 .env.example
 output/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
