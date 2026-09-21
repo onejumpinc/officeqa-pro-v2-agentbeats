@@ -7,16 +7,21 @@ from urllib.request import Request
 
 import pytest
 
+from tools import verify_exact_result as gate
 from tools.fetch_pinned_dataset import SafeRedirectHandler
 from tools.verify_exact_result import (
+    COMPILE_MANIFESTS,
     DATASET_REVISION,
     EXPECTED_IMAGES,
     EXPECTED_MANIFEST_SOURCES,
+    EXPECTED_TOOL_IMAGES,
     GATEWAY_MANIFEST,
     GENERATED_GATEWAY_MANIFEST,
     GREEN_MANIFEST,
+    PINNED_PURPLE_MANIFEST,
     PURPLE_AGENT_ID,
     PURPLE_MANIFESTS,
+    _expected_manifest_digests,
     load_dataset,
     verify_artifact,
     verify_provenance,
@@ -24,6 +29,12 @@ from tools.verify_exact_result import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+TEST_GREEN_AGENT_ID = "11111111-1111-4111-8111-111111111111"
+
+
+@pytest.fixture(autouse=True)
+def _configure_green_agent_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gate, "GREEN_AGENT_ID", TEST_GREEN_AGENT_ID)
 
 
 def _dataset(tmp_path: Path) -> tuple[Path, list[dict[str, str]]]:
@@ -182,7 +193,7 @@ def _generated_scenario() -> dict:
                 "config": {"hf_token": "${config.green_hf_token}"},
             },
             "agent": {
-                "manifest": max(PURPLE_MANIFESTS),
+                "manifest": PINNED_PURPLE_MANIFEST,
                 "config": {
                     "officeqa_api_url": "${config.agent_officeqa_api_url}",
                     "officeqa_api_token": "${config.agent_officeqa_api_token}",
@@ -193,6 +204,7 @@ def _generated_scenario() -> dict:
             {"to": "#gateway.green", "from": "#green.a2a"},
             {"to": "#gateway.purple1", "from": "#agent.a2a"},
             {"to": "#green.proxy", "from": "#gateway.proxy", "weak": True},
+            {"to": "#agent.proxy", "from": "#gateway.proxy", "weak": True},
         ],
         "exports": {"results": "#gateway.results"},
         "metadata": {
@@ -205,28 +217,63 @@ def _generated_scenario() -> dict:
 
 
 def _provenance() -> dict:
+    manifests = _expected_manifest_digests("self-run")
     return {
         "image_digests": {
             f"/component-{index}": image
             for index, image in enumerate(sorted(EXPECTED_IMAGES))
         },
-        "manifest_digests": {
-            "/": "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-            "/gateway": "sha256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
-            "/green": "sha256:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC=",
-            "/agent": "sha256:DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD=",
-        },
+        "manifest_digests": manifests["0"],
+        "manifest_digests_by_shard": manifests,
         "release_manifests": EXPECTED_MANIFEST_SOURCES,
-        "timestamp": "2026-09-20T00:00:00Z",
+        "tool_images": EXPECTED_TOOL_IMAGES,
+        "timestamp": "2026-09-21T00:00:00Z",
         "github_actions": {
             "run_url": "https://github.com/onejumpinc/repo/actions/runs/1",
             "ref": "refs/heads/release",
-            "sha": "abc",
+            "sha": "a" * 40,
             "repository_url": "https://github.com/onejumpinc/repo",
             "workflow_ref": "onejumpinc/repo/.github/workflows/run.yml@refs/heads/release",
-            "workflow_sha": "abc",
+            "workflow_sha": "a" * 40,
+            "job_workflow_ref": "onejumpinc/repo/.github/workflows/run.yml@refs/heads/release",
+            "job_workflow_sha": "a" * 40,
         },
     }
+
+
+def _quick_provenance() -> dict:
+    provenance = _provenance()
+    manifests = _expected_manifest_digests("generated")
+    provenance["manifest_digests"] = manifests["0"]
+    provenance["manifest_digests_by_shard"] = manifests
+    provenance["github_actions"] = {
+        "run_url": "https://github.com/onejumpinc/officeqa-pro-v2-agentbeats/actions/runs/1",
+        "ref": "refs/heads/main",
+        "sha": "d" * 40,
+        "repository_url": "https://github.com/onejumpinc/officeqa-pro-v2-agentbeats",
+        "workflow_ref": (
+            "onejumpinc/officeqa-pro-v2-agentbeats/"
+            ".github/workflows/quick-submit.yml@refs/heads/main"
+        ),
+        "workflow_sha": "c" * 40,
+        "job_workflow_ref": (
+            "onejumpinc/officeqa-pro-v2-agentbeats/"
+            f".github/workflows/quick-submit-runner.yml@{'b' * 40}"
+        ),
+        "job_workflow_sha": "b" * 40,
+    }
+    provenance["pull_request"] = {
+        "number": 42,
+        "event_name": "pull_request_target",
+        "actor": "agentbeats-dev[bot]",
+        "author": "agentbeats-dev[bot]",
+        "head_ref": "quick-submit-01234567-89ab-4def-8123-456789abcdef",
+        "head_sha": "d" * 40,
+        "head_repository": "onejumpinc/officeqa-pro-v2-agentbeats",
+        "base_ref": "main",
+        "base_sha": "c" * 40,
+    }
+    return provenance
 
 
 def test_exact_scenario_result_and_provenance_pass(tmp_path: Path) -> None:
@@ -236,14 +283,27 @@ def test_exact_scenario_result_and_provenance_pass(tmp_path: Path) -> None:
     verify_artifact(_artifact(rows), rows)
     verify_provenance(
         _provenance(),
+        scenario_kind="self-run",
         expected_run_url="https://github.com/onejumpinc/repo/actions/runs/1",
         expected_repository_url="https://github.com/onejumpinc/repo",
-        expected_github_sha="abc",
+        expected_github_sha="a" * 40,
     )
 
 
 def test_agentbeats_generated_scenario_passes() -> None:
     verify_scenario(_generated_scenario())
+
+
+def test_compiled_generated_scenario_requires_exact_shard_and_local_manifests() -> None:
+    scenario = _generated_scenario()
+    scenario["components"]["gateway"]["manifest"] = COMPILE_MANIFESTS["gateway"]
+    scenario["components"]["green"]["manifest"] = COMPILE_MANIFESTS["green"]
+    scenario["components"]["agent"]["manifest"] = COMPILE_MANIFESTS["purple"]
+    scenario["components"]["gateway"]["config"]["assessment_config"]["shard_index"] = 7
+    verify_scenario(scenario, expected_shard_index=7, compile_manifests=True)
+
+    with pytest.raises(ValueError, match="shard_index"):
+        verify_scenario(scenario, expected_shard_index=6, compile_manifests=True)
 
 
 def test_scenario_rejects_partial_num_instances() -> None:
@@ -282,6 +342,15 @@ def test_scenario_rejects_placeholder_green_id() -> None:
         "REPLACE_WITH_GREEN_AGENT_ID"
     )
     with pytest.raises(ValueError, match="placeholder"):
+        verify_scenario(scenario)
+
+
+def test_scenario_rejects_unpinned_green_id() -> None:
+    scenario = _scenario()
+    scenario["metadata"]["agentbeats_ids"]["officeqa_pro_v2_green"] = (
+        "22222222-2222-4222-8222-222222222222"
+    )
+    with pytest.raises(ValueError, match="pinned green"):
         verify_scenario(scenario)
 
 
@@ -325,7 +394,7 @@ def test_provenance_rejects_changed_runtime_image() -> None:
     provenance = _provenance()
     provenance["image_digests"]["/component-0"] = "changed@sha256:bad"
     with pytest.raises(ValueError, match="runtime image digests"):
-        verify_provenance(provenance)
+        verify_provenance(provenance, scenario_kind="self-run")
 
 
 def test_provenance_rejects_changed_manifest_source() -> None:
@@ -335,7 +404,56 @@ def test_provenance_rejects_changed_manifest_source() -> None:
         "purple": {"url": "https://example.invalid", "raw_sha256": "0" * 64},
     }
     with pytest.raises(ValueError, match="manifest sources"):
-        verify_provenance(provenance)
+        verify_provenance(provenance, scenario_kind="self-run")
+
+
+def test_provenance_rejects_changed_compiled_manifest_digest() -> None:
+    provenance = _provenance()
+    provenance["manifest_digests_by_shard"]["4"]["/"] = (
+        "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+    )
+    with pytest.raises(ValueError, match="compiled manifest digests"):
+        verify_provenance(provenance, scenario_kind="self-run")
+
+
+def test_quick_submit_provenance_binds_event_caller_and_runner() -> None:
+    provenance = _quick_provenance()
+    verify_provenance(
+        provenance,
+        scenario_kind="generated",
+        expected_run_url=(
+            "https://github.com/onejumpinc/officeqa-pro-v2-agentbeats/actions/runs/1"
+        ),
+        expected_repository_url=(
+            "https://github.com/onejumpinc/officeqa-pro-v2-agentbeats"
+        ),
+        expected_github_sha="d" * 40,
+        expected_github_ref="refs/heads/main",
+        expected_workflow_ref=(
+            "onejumpinc/officeqa-pro-v2-agentbeats/"
+            ".github/workflows/quick-submit.yml@refs/heads/main"
+        ),
+        expected_workflow_sha="c" * 40,
+        expected_job_workflow_ref=(
+            "onejumpinc/officeqa-pro-v2-agentbeats/"
+            f".github/workflows/quick-submit-runner.yml@{'b' * 40}"
+        ),
+        expected_job_workflow_sha="b" * 40,
+        expected_submission_id="01234567-89ab-4def-8123-456789abcdef",
+        expected_pr_number=42,
+        expected_actor="agentbeats-dev[bot]",
+        expected_head_repository="onejumpinc/officeqa-pro-v2-agentbeats",
+        expected_base_sha="c" * 40,
+    )
+
+    provenance["github_actions"]["job_workflow_sha"] = "e" * 40
+    provenance.pop("pull_request")
+    with pytest.raises(ValueError, match="job_workflow_sha"):
+        verify_provenance(
+            provenance,
+            scenario_kind="generated",
+            expected_job_workflow_sha="b" * 40,
+        )
 
 
 def test_dataset_redirect_does_not_forward_token_cross_host() -> None:

@@ -10,6 +10,7 @@ import json
 import math
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ DATASET_SEMANTIC_SHA256 = (
 EXPECTED_ROWS = 90
 EXPECTED_SHARDS = 10
 PURPLE_AGENT_ID = "01a05b80-58e6-7e71-95e9-656bde816e85"
+GREEN_AGENT_ID = "REPLACE_WITH_GREEN_AGENT_ID"
 
 GATEWAY_MANIFEST = (
     "https://raw.githubusercontent.com/RDI-Foundation/agentbeats-gateway/"
@@ -44,6 +46,19 @@ PURPLE_MANIFESTS = {
     # still checked byte-for-byte through provenance below.
     "https://raw.githubusercontent.com/onejumpinc/officeqa-agentbeats/main/amber-manifest.json5",
 }
+PINNED_PURPLE_MANIFEST = (
+    "https://raw.githubusercontent.com/onejumpinc/officeqa-agentbeats/"
+    "d376c66f2be259674704ae4cc71df1fe3c9b54ce/amber-manifest.json5"
+)
+COMPILE_MANIFESTS = {
+    "gateway": "release-manifests/gateway.json5",
+    "green": "release-manifests/green.json5",
+    "purple": "release-manifests/purple.json5",
+}
+AMBER_CLI_IMAGE = (
+    "ghcr.io/rdi-foundation/amber-cli@"
+    "sha256:3514b6cf27896e8cc9a148e8ebdc96ae5a15fe36deec69b7250ab25e126511ca"
+)
 EXPECTED_IMAGES = {
     (
         "ghcr.io/rdi-foundation/agentbeats-gateway@"
@@ -68,16 +83,70 @@ EXPECTED_MANIFEST_SOURCES = {
         "raw_sha256": "019d98d164d479c77724dda4c20809df0ad1229b97b097893d9a98909f577946",
     },
     "purple": {
-        "url": min(PURPLE_MANIFESTS),
+        "url": PINNED_PURPLE_MANIFEST,
         "raw_sha256": "7175137be7a12305c47f0535f7ece1130dace1bc2537ebd0bcc849021579b4c5",
     },
 }
+EXPECTED_TOOL_IMAGES = {"amber_cli": AMBER_CLI_IMAGE}
+
+_CHILD_MANIFEST_DIGESTS = {
+    "gateway": "sha256:Ba99ymNGSymbrF9jGwLfnZaSnzPrw9sTJ5veaYMxV2Q=",
+    "green": "sha256:k05m8xoHnYoPwBfLrP2fhAa8ipVxIn+S4UuicaSJNvo=",
+    "purple": "sha256:FqVrezifzyqnAacQEFw0fUNChsSTaeIEZ09JCLa7SRo=",
+}
+_GENERATED_ROOT_DIGESTS = (
+    "sha256:kStPbprHWRBrnvgZhZqLnS3w0N9ctMv68h+Q1clHmKc=",
+    "sha256:tr0X8h6cCMKY4Ko/Dh6433AKOUL70SJJ4A176x3jPwA=",
+    "sha256:8UM6HHbYMG0Y+4UaQ2WFT2n4XHmj45f4Tx05eK8Tbpw=",
+    "sha256:CjrZXS/AEE0ZK1Pd2tgEVMdzmTR5KQ682et44/WBBzA=",
+    "sha256:fydWDF5VERvyZlEpgb017ptwqUDaqvoCLWYPbYljleQ=",
+    "sha256:bbIA6sRFJk+PTlVotewqTfvbnHMUl/1buGEkH35SfuY=",
+    "sha256:EIfufeXStQo2fKgn+vLzoY5w3RbRL/t19TAeSGcoFQw=",
+    "sha256:BDIpek59EeluMeV9MZuRhgkyQ5bFjQ0g7uzxvlxHNR8=",
+    "sha256:ytTSdTEuOwHj6PynSLQ2WeEZLq3/d71mYDrYxnMraIY=",
+    "sha256:an+gsMw/eXyuimzyDBojv8/NAamNdsFe33woJV/GH40=",
+)
+_SELF_RUN_ROOT_DIGESTS = (
+    "sha256:pptFjLMiNouuAUsBgAMR56nvLSqDXB6yiPeNEOUQQk0=",
+    "sha256:yQfKfGw0AZ+6WaNnyoU/e10ISLt7/rtyDkObCB0hY7I=",
+    "sha256:q4TJOjKXW8FTPvZD4kTn0M9dYz1p3e6JBwz6MZCHkzU=",
+    "sha256:nbUAK6HYJQGVKG/ZGtHgx4qe3OMh5e/ad9lRb4qAIYI=",
+    "sha256:0gvDIPfhn4yDU4JAsFUyllsbls5L0EAue+l8GS8sAtI=",
+    "sha256:BK/fbM0XvaQZBjTYCn/6NETDYmTy+713yweb/fosTCE=",
+    "sha256:gCmBLKiaqR3VBX3tIufokvvG2gBpHBeydtMZ+kLTTpE=",
+    "sha256:jTr0ujgBmyunhuUtGKMRCq9IQUVOxZZIGlXHYZ/ohFo=",
+    "sha256:9SGRbIhFaaBNK9yE2vUacEuQggrgwa5sleB3rivpjhI=",
+    "sha256:UGT+s+Gw4sNF8h/otEoYpaf013e2wLCNcKy4a3z6C40=",
+)
+
+
+def _expected_manifest_digests(kind: str) -> dict[str, dict[str, str]]:
+    if kind == "generated":
+        roots = _GENERATED_ROOT_DIGESTS
+        children = {
+            "/agent": _CHILD_MANIFEST_DIGESTS["purple"],
+            "/gateway": _CHILD_MANIFEST_DIGESTS["gateway"],
+            "/green": _CHILD_MANIFEST_DIGESTS["green"],
+        }
+    elif kind == "self-run":
+        roots = _SELF_RUN_ROOT_DIGESTS
+        children = {
+            "/gateway": _CHILD_MANIFEST_DIGESTS["gateway"],
+            "/officeqa_pro_v2_green": _CHILD_MANIFEST_DIGESTS["green"],
+            "/opencode_agent": _CHILD_MANIFEST_DIGESTS["purple"],
+        }
+    else:
+        raise ValueError(f"unknown scenario kind: {kind!r}")
+    return {str(index): {"/": root, **children} for index, root in enumerate(roots)}
+
 
 UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
     re.IGNORECASE,
 )
 MANIFEST_DIGEST_RE = re.compile(r"^sha256:[A-Za-z0-9+/]{43}=$")
+GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -154,7 +223,10 @@ def load_dataset(
 
 
 def _verify_assessment(
-    assessment: dict[str, Any], *, require_shard_index: bool
+    assessment: dict[str, Any],
+    *,
+    require_shard_index: bool,
+    expected_shard_index: int | None,
 ) -> None:
     if "num_instances" in assessment:
         raise ValueError("num_instances is forbidden for a scored public run")
@@ -173,13 +245,28 @@ def _verify_assessment(
     ):
         raise ValueError(f"num_shards must be exactly {EXPECTED_SHARDS}")
     shard_index = assessment.get("shard_index")
-    if require_shard_index and (
+    if expected_shard_index is not None:
+        if (
+            isinstance(expected_shard_index, bool)
+            or not isinstance(expected_shard_index, int)
+            or not 0 <= expected_shard_index < EXPECTED_SHARDS
+        ):
+            raise ValueError("expected shard index is invalid")
+        if (
+            isinstance(shard_index, bool)
+            or not isinstance(shard_index, int)
+            or shard_index != expected_shard_index
+        ):
+            raise ValueError(
+                f"scenario shard_index must be exactly {expected_shard_index}"
+            )
+    elif require_shard_index and (
         isinstance(shard_index, bool)
         or not isinstance(shard_index, int)
         or shard_index != 0
     ):
         raise ValueError("unpatched scenario shard_index must be exactly 0")
-    if (
+    elif (
         not require_shard_index
         and shard_index is not None
         and (
@@ -221,6 +308,17 @@ def _verify_registered_id(value: Any, label: str) -> str:
     return value
 
 
+def _verify_green_id(value: Any, label: str) -> str:
+    if not UUID_RE.fullmatch(GREEN_AGENT_ID):
+        raise ValueError(
+            "release gate green AgentBeats ID is not configured; registration placeholder remains"
+        )
+    registered = _verify_registered_id(value, label)
+    if registered != GREEN_AGENT_ID:
+        raise ValueError(f"{label} does not match the pinned green AgentBeats ID")
+    return registered
+
+
 def _verify_component_shape(component: dict[str, Any], label: str) -> None:
     if set(component) != {"manifest", "config"}:
         raise ValueError(f"{label} fields are not exact")
@@ -249,7 +347,11 @@ def _verify_secret_schema(scenario: dict[str, Any], expected_keys: set[str]) -> 
 
 
 def _verify_self_run_scenario(
-    scenario: dict[str, Any], components: dict[str, Any]
+    scenario: dict[str, Any],
+    components: dict[str, Any],
+    *,
+    expected_shard_index: int | None,
+    compile_manifests: bool,
 ) -> None:
     if scenario.get("manifest_version") != "0.4.0":
         raise ValueError("self-run manifest_version must be 0.4.0")
@@ -262,7 +364,10 @@ def _verify_self_run_scenario(
 
     gateway = _mapping(components["gateway"], "components.gateway")
     _verify_component_shape(gateway, "components.gateway")
-    if gateway.get("manifest") != GATEWAY_MANIFEST:
+    expected_gateway_manifest = (
+        COMPILE_MANIFESTS["gateway"] if compile_manifests else GATEWAY_MANIFEST
+    )
+    if gateway.get("manifest") != expected_gateway_manifest:
         raise ValueError("gateway manifest is not pinned to the approved commit")
     gateway_config = _mapping(gateway.get("config"), "gateway.config")
     if set(gateway_config) != {"assessment_config", "participant_roles"}:
@@ -271,7 +376,11 @@ def _verify_self_run_scenario(
         gateway_config.get("assessment_config"),
         "gateway.config.assessment_config",
     )
-    _verify_assessment(assessment, require_shard_index=True)
+    _verify_assessment(
+        assessment,
+        require_shard_index=True,
+        expected_shard_index=expected_shard_index,
+    )
     expected_roles = {"green": "officeqa_pro_v2_green", "purple1": "agent"}
     if gateway_config.get("participant_roles") != expected_roles:
         raise ValueError("gateway participant_roles do not match the self-run release")
@@ -280,14 +389,20 @@ def _verify_self_run_scenario(
         components["officeqa_pro_v2_green"], "components.officeqa_pro_v2_green"
     )
     _verify_component_shape(green, "components.officeqa_pro_v2_green")
-    if green.get("manifest") != GREEN_MANIFEST:
+    expected_green_manifest = (
+        COMPILE_MANIFESTS["green"] if compile_manifests else GREEN_MANIFEST
+    )
+    if green.get("manifest") != expected_green_manifest:
         raise ValueError("green manifest is not pinned to the approved commit")
     if green.get("config") != {"hf_token": "${config.green_hf_token}"}:
         raise ValueError("green dataset token binding is not exact")
 
     purple = _mapping(components["opencode_agent"], "components.opencode_agent")
     _verify_component_shape(purple, "components.opencode_agent")
-    if purple.get("manifest") not in PURPLE_MANIFESTS:
+    approved_purple_manifests = (
+        {COMPILE_MANIFESTS["purple"]} if compile_manifests else PURPLE_MANIFESTS
+    )
+    if purple.get("manifest") not in approved_purple_manifests:
         raise ValueError("purple manifest is not an approved OfficeQA proxy manifest")
     if purple.get("config") != {
         "officeqa_api_url": "${config.participant_api_url}",
@@ -321,7 +436,7 @@ def _verify_self_run_scenario(
         raise ValueError(
             "self-run metadata does not identify the approved purple agent"
         )
-    green_id = _verify_registered_id(
+    green_id = _verify_green_id(
         ids["officeqa_pro_v2_green"], "the registered green AgentBeats ID"
     )
     if green_id == PURPLE_AGENT_ID:
@@ -329,7 +444,11 @@ def _verify_self_run_scenario(
 
 
 def _verify_generated_scenario(
-    scenario: dict[str, Any], components: dict[str, Any]
+    scenario: dict[str, Any],
+    components: dict[str, Any],
+    *,
+    expected_shard_index: int | None,
+    compile_manifests: bool,
 ) -> None:
     if scenario.get("manifest_version") != "0.1.0":
         raise ValueError("generated manifest_version must be 0.1.0")
@@ -346,24 +465,31 @@ def _verify_generated_scenario(
 
     gateway = _mapping(components["gateway"], "components.gateway")
     _verify_component_shape(gateway, "components.gateway")
-    if gateway.get("manifest") not in {GATEWAY_MANIFEST, GENERATED_GATEWAY_MANIFEST}:
+    approved_gateway_manifests = (
+        {COMPILE_MANIFESTS["gateway"]}
+        if compile_manifests
+        else {GATEWAY_MANIFEST, GENERATED_GATEWAY_MANIFEST}
+    )
+    if gateway.get("manifest") not in approved_gateway_manifests:
         raise ValueError("generated gateway manifest is not the approved v0.3 manifest")
     gateway_config = _mapping(gateway.get("config"), "gateway.config")
-    if not {"assessment_config", "participant_roles"}.issubset(gateway_config):
-        raise ValueError("generated gateway config is incomplete")
-    if set(gateway_config) - {
+    if set(gateway_config) != {
         "assessment_config",
         "participant_roles",
         "callback_urls",
     }:
-        raise ValueError("generated gateway config has unexpected fields")
-    if gateway_config.get("callback_urls") not in (None, {}):
-        raise ValueError("generated callback_urls must be absent or empty")
+        raise ValueError("generated gateway config fields are not exact")
+    if gateway_config.get("callback_urls") != {}:
+        raise ValueError("generated callback_urls must be empty")
     assessment = _mapping(
         gateway_config.get("assessment_config"),
         "gateway.config.assessment_config",
     )
-    _verify_assessment(assessment, require_shard_index=False)
+    _verify_assessment(
+        assessment,
+        require_shard_index=False,
+        expected_shard_index=expected_shard_index,
+    )
     if gateway_config.get("participant_roles") != {
         "green": "green",
         "purple1": "agent",
@@ -372,14 +498,20 @@ def _verify_generated_scenario(
 
     green = _mapping(components["green"], "components.green")
     _verify_component_shape(green, "components.green")
-    if green.get("manifest") != GREEN_MANIFEST:
+    expected_green_manifest = (
+        COMPILE_MANIFESTS["green"] if compile_manifests else GREEN_MANIFEST
+    )
+    if green.get("manifest") != expected_green_manifest:
         raise ValueError("generated green manifest is not the approved pinned manifest")
     if green.get("config") != {"hf_token": "${config.green_hf_token}"}:
         raise ValueError("generated green dataset token binding is not exact")
 
     purple = _mapping(components["agent"], "components.agent")
     _verify_component_shape(purple, "components.agent")
-    if purple.get("manifest") not in PURPLE_MANIFESTS:
+    approved_purple_manifests = (
+        {COMPILE_MANIFESTS["purple"]} if compile_manifests else PURPLE_MANIFESTS
+    )
+    if purple.get("manifest") not in approved_purple_manifests:
         raise ValueError("generated purple manifest is not approved")
     if purple.get("config") != {
         "officeqa_api_url": "${config.agent_officeqa_api_url}",
@@ -387,18 +519,13 @@ def _verify_generated_scenario(
     }:
         raise ValueError("generated purple endpoint secret bindings are not exact")
 
-    base_bindings = {
+    expected_bindings = {
         ("#gateway.green", "#green.a2a", False),
         ("#gateway.purple1", "#agent.a2a", False),
         ("#green.proxy", "#gateway.proxy", True),
-    }
-    actual_bindings = _binding_set(scenario)
-    allowed_bindings = base_bindings | {
         ("#agent.proxy", "#gateway.proxy", True),
     }
-    if not base_bindings.issubset(actual_bindings) or not actual_bindings.issubset(
-        allowed_bindings
-    ):
+    if _binding_set(scenario) != expected_bindings:
         raise ValueError("scenario bindings do not match generated release topology")
     if scenario.get("exports") != {"results": "#gateway.results"}:
         raise ValueError("generated scenario exports are not exact")
@@ -411,12 +538,27 @@ def _verify_generated_scenario(
         raise ValueError("generated agentbeats_ids keys are not exact")
     if ids["agent"] != PURPLE_AGENT_ID:
         raise ValueError("generated scenario does not use the approved purple agent")
-    green_id = _verify_registered_id(ids["green"], "the generated green AgentBeats ID")
+    green_id = _verify_green_id(ids["green"], "the generated green AgentBeats ID")
     if green_id == PURPLE_AGENT_ID:
         raise ValueError("green and purple AgentBeats IDs must differ")
 
 
-def verify_scenario(scenario: dict[str, Any]) -> None:
+def scenario_kind(scenario: dict[str, Any]) -> str:
+    components = _mapping(scenario.get("components"), "scenario.components")
+    component_names = set(components)
+    if component_names == {"gateway", "officeqa_pro_v2_green", "opencode_agent"}:
+        return "self-run"
+    if component_names == {"gateway", "green", "agent"}:
+        return "generated"
+    raise ValueError(f"unexpected scenario components: {sorted(components)}")
+
+
+def verify_scenario(
+    scenario: dict[str, Any],
+    *,
+    expected_shard_index: int | None = None,
+    compile_manifests: bool = False,
+) -> None:
     expected_top_level = {
         "manifest_version",
         "experimental_features",
@@ -429,13 +571,23 @@ def verify_scenario(scenario: dict[str, Any]) -> None:
     if set(scenario) != expected_top_level:
         raise ValueError("scenario top-level fields are not exact")
     components = _mapping(scenario.get("components"), "scenario.components")
-    component_names = set(components)
-    if component_names == {"gateway", "officeqa_pro_v2_green", "opencode_agent"}:
-        _verify_self_run_scenario(scenario, components)
-    elif component_names == {"gateway", "green", "agent"}:
-        _verify_generated_scenario(scenario, components)
+    kind = scenario_kind(scenario)
+    if kind == "self-run":
+        _verify_self_run_scenario(
+            scenario,
+            components,
+            expected_shard_index=expected_shard_index,
+            compile_manifests=compile_manifests,
+        )
+    elif kind == "generated":
+        _verify_generated_scenario(
+            scenario,
+            components,
+            expected_shard_index=expected_shard_index,
+            compile_manifests=compile_manifests,
+        )
     else:
-        raise ValueError(f"unexpected scenario components: {sorted(components)}")
+        raise AssertionError(f"unhandled scenario kind: {kind}")
 
 
 def verify_artifact(
@@ -560,10 +712,36 @@ def verify_artifact(
 def verify_provenance(
     provenance: dict[str, Any],
     *,
+    scenario_kind: str,
     expected_run_url: str | None = None,
     expected_repository_url: str | None = None,
     expected_github_sha: str | None = None,
+    expected_github_ref: str | None = None,
+    expected_workflow_ref: str | None = None,
+    expected_workflow_sha: str | None = None,
+    expected_job_workflow_ref: str | None = None,
+    expected_job_workflow_sha: str | None = None,
+    expected_submission_id: str | None = None,
+    expected_pr_number: int | None = None,
+    expected_actor: str | None = None,
+    expected_head_repository: str | None = None,
+    expected_base_sha: str | None = None,
 ) -> None:
+    quick_submit = expected_submission_id is not None
+    expected_top_level = {
+        "image_digests",
+        "manifest_digests",
+        "manifest_digests_by_shard",
+        "release_manifests",
+        "tool_images",
+        "timestamp",
+        "github_actions",
+    }
+    if quick_submit:
+        expected_top_level.add("pull_request")
+    if set(provenance) != expected_top_level:
+        raise ValueError("provenance top-level fields are not exact")
+
     images = _mapping(provenance.get("image_digests"), "provenance.image_digests")
     actual_images = set(images.values())
     if actual_images != EXPECTED_IMAGES or len(images) != len(EXPECTED_IMAGES):
@@ -571,6 +749,10 @@ def verify_provenance(
             "runtime image digests differ from the exact release set: "
             f"got={sorted(actual_images)}"
         )
+
+    tool_images = _mapping(provenance.get("tool_images"), "provenance.tool_images")
+    if tool_images != EXPECTED_TOOL_IMAGES:
+        raise ValueError("release tool images differ from the exact pinned set")
 
     release_manifests = _mapping(
         provenance.get("release_manifests"), "provenance.release_manifests"
@@ -580,29 +762,43 @@ def verify_provenance(
             "release manifest sources do not match the immutable release set"
         )
 
-    manifests = _mapping(
-        provenance.get("manifest_digests"), "provenance.manifest_digests"
+    expected_manifests = _expected_manifest_digests(scenario_kind)
+    manifests_by_shard = _mapping(
+        provenance.get("manifest_digests_by_shard"),
+        "provenance.manifest_digests_by_shard",
     )
-    if len(manifests) != 4:
-        raise ValueError(f"expected 4 manifest digests, found {len(manifests)}")
+    if manifests_by_shard != expected_manifests:
+        raise ValueError("compiled manifest digests differ from the exact release set")
+    manifests = _mapping(provenance.get("manifest_digests"), "manifest_digests")
+    if manifests != expected_manifests["0"]:
+        raise ValueError("flat manifest digests do not match release shard 0")
     if any(
-        not isinstance(value, str) or not MANIFEST_DIGEST_RE.fullmatch(value)
-        for value in manifests.values()
+        not MANIFEST_DIGEST_RE.fullmatch(value)
+        for shard in manifests_by_shard.values()
+        for value in _mapping(shard, "manifest digest shard").values()
+        if isinstance(value, str)
     ):
         raise ValueError("provenance contains an invalid manifest digest")
 
     timestamp = provenance.get("timestamp")
-    if not isinstance(timestamp, str) or not timestamp.endswith("Z"):
-        raise ValueError("provenance timestamp is missing or is not UTC")
+    if not isinstance(timestamp, str) or not TIMESTAMP_RE.fullmatch(timestamp):
+        raise ValueError("provenance timestamp is not an exact UTC timestamp")
+    datetime.fromisoformat(timestamp)
+
     actions = _mapping(provenance.get("github_actions"), "provenance.github_actions")
-    for key in (
+    action_keys = {
         "run_url",
         "ref",
         "sha",
         "repository_url",
         "workflow_ref",
         "workflow_sha",
-    ):
+        "job_workflow_ref",
+        "job_workflow_sha",
+    }
+    if set(actions) != action_keys:
+        raise ValueError("provenance.github_actions fields are not exact")
+    for key in action_keys:
         if not isinstance(actions.get(key), str) or not actions[key]:
             raise ValueError(f"provenance.github_actions.{key} is missing")
     if expected_run_url and actions["run_url"] != expected_run_url:
@@ -611,6 +807,63 @@ def verify_provenance(
         raise ValueError("provenance repository_url does not identify this repository")
     if expected_github_sha and actions["sha"] != expected_github_sha:
         raise ValueError("provenance SHA does not identify this workflow revision")
+    if expected_github_ref and actions["ref"] != expected_github_ref:
+        raise ValueError("provenance ref does not identify the expected workflow ref")
+    if expected_workflow_ref and actions["workflow_ref"] != expected_workflow_ref:
+        raise ValueError("provenance workflow_ref is not the trusted caller")
+    if expected_workflow_sha and actions["workflow_sha"] != expected_workflow_sha:
+        raise ValueError("provenance workflow_sha is not the trusted caller revision")
+    if (
+        expected_job_workflow_ref
+        and actions["job_workflow_ref"] != expected_job_workflow_ref
+    ):
+        raise ValueError("provenance job_workflow_ref is not the pinned runner")
+    if (
+        expected_job_workflow_sha
+        and actions["job_workflow_sha"] != expected_job_workflow_sha
+    ):
+        raise ValueError(
+            "provenance job_workflow_sha is not the pinned runner revision"
+        )
+
+    if quick_submit:
+        if not all(
+            value is not None
+            for value in (
+                expected_pr_number,
+                expected_actor,
+                expected_head_repository,
+                expected_github_sha,
+                expected_base_sha,
+            )
+        ):
+            raise ValueError("quick-submit provenance expectations are incomplete")
+        if not UUID_RE.fullmatch(expected_submission_id):
+            raise ValueError("expected submission ID is not a canonical UUID")
+        pull_request = _mapping(
+            provenance.get("pull_request"), "provenance.pull_request"
+        )
+        expected_pull_request = {
+            "number": expected_pr_number,
+            "event_name": "pull_request_target",
+            "actor": expected_actor,
+            "author": expected_actor,
+            "head_ref": f"quick-submit-{expected_submission_id}",
+            "head_sha": expected_github_sha,
+            "head_repository": expected_head_repository,
+            "base_ref": "main",
+            "base_sha": expected_base_sha,
+        }
+        if pull_request != expected_pull_request:
+            raise ValueError("pull-request provenance does not match the trusted event")
+        for label, value in (
+            ("head SHA", expected_github_sha),
+            ("base SHA", expected_base_sha),
+            ("workflow SHA", actions["workflow_sha"]),
+            ("job workflow SHA", actions["job_workflow_sha"]),
+        ):
+            if not GIT_SHA_RE.fullmatch(value):
+                raise ValueError(f"provenance {label} is not a full Git SHA")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -619,6 +872,8 @@ def _parser() -> argparse.ArgumentParser:
 
     scenario_parser = subparsers.add_parser("scenario", help="verify release scenario")
     scenario_parser.add_argument("--scenario", type=Path, required=True)
+    scenario_parser.add_argument("--expected-shard-index", type=int)
+    scenario_parser.add_argument("--compile-manifests", action="store_true")
 
     result_parser = subparsers.add_parser("result", help="verify exact public result")
     result_parser.add_argument("--artifact", type=Path, required=True)
@@ -628,6 +883,16 @@ def _parser() -> argparse.ArgumentParser:
     result_parser.add_argument("--expected-run-url")
     result_parser.add_argument("--expected-repository-url")
     result_parser.add_argument("--expected-github-sha")
+    result_parser.add_argument("--expected-github-ref")
+    result_parser.add_argument("--expected-workflow-ref")
+    result_parser.add_argument("--expected-workflow-sha")
+    result_parser.add_argument("--expected-job-workflow-ref")
+    result_parser.add_argument("--expected-job-workflow-sha")
+    result_parser.add_argument("--expected-submission-id")
+    result_parser.add_argument("--expected-pr-number", type=int)
+    result_parser.add_argument("--expected-actor")
+    result_parser.add_argument("--expected-head-repository")
+    result_parser.add_argument("--expected-base-sha")
     return parser
 
 
@@ -635,8 +900,13 @@ def main() -> int:
     args = _parser().parse_args()
     try:
         scenario = _load_json(args.scenario)
-        verify_scenario(scenario)
+        verify_scenario(
+            scenario,
+            expected_shard_index=getattr(args, "expected_shard_index", None),
+            compile_manifests=getattr(args, "compile_manifests", False),
+        )
         if args.command == "result":
+            kind = scenario_kind(scenario)
             rows = load_dataset(args.dataset)
             metadata = _mapping(scenario.get("metadata"), "scenario.metadata")
             expected_participants = _mapping(
@@ -645,9 +915,20 @@ def main() -> int:
             verify_artifact(_load_json(args.artifact), rows, expected_participants)
             verify_provenance(
                 _load_json(args.provenance),
+                scenario_kind=kind,
                 expected_run_url=args.expected_run_url,
                 expected_repository_url=args.expected_repository_url,
                 expected_github_sha=args.expected_github_sha,
+                expected_github_ref=args.expected_github_ref,
+                expected_workflow_ref=args.expected_workflow_ref,
+                expected_workflow_sha=args.expected_workflow_sha,
+                expected_job_workflow_ref=args.expected_job_workflow_ref,
+                expected_job_workflow_sha=args.expected_job_workflow_sha,
+                expected_submission_id=args.expected_submission_id,
+                expected_pr_number=args.expected_pr_number,
+                expected_actor=args.expected_actor,
+                expected_head_repository=args.expected_head_repository,
+                expected_base_sha=args.expected_base_sha,
             )
     except (OSError, TypeError, json.JSONDecodeError, ValueError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
