@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from email.message import Message
 from pathlib import Path
 from urllib.request import Request
@@ -10,9 +11,11 @@ import pytest
 from tools import verify_exact_result as gate
 from tools.fetch_pinned_dataset import SafeRedirectHandler
 from tools.verify_exact_result import (
+    _COMPOSE_IMAGE_REPLACEMENTS,
+    _COMPOSE_SOURCE_IMAGE_COUNTS,
     COMPILE_MANIFESTS,
     DATASET_REVISION,
-    EXPECTED_IMAGES,
+    EXPECTED_FRAMEWORK_IMAGES,
     EXPECTED_MANIFEST_SOURCES,
     EXPECTED_TOOL_IMAGES,
     GATEWAY_MANIFEST,
@@ -21,10 +24,15 @@ from tools.verify_exact_result import (
     PINNED_PURPLE_MANIFEST,
     PURPLE_AGENT_ID,
     PURPLE_MANIFESTS,
+    _expected_compiled_images,
     _expected_manifest_digests,
+    _expected_runtime_images,
     load_dataset,
+    pin_compose_images,
     verify_artifact,
+    verify_compiled_ir,
     verify_provenance,
+    verify_rendered_compose,
     verify_scenario,
 )
 
@@ -219,14 +227,13 @@ def _generated_scenario() -> dict:
 def _provenance() -> dict:
     manifests = _expected_manifest_digests("self-run")
     return {
-        "image_digests": {
-            f"/component-{index}": image
-            for index, image in enumerate(sorted(EXPECTED_IMAGES))
-        },
+        "image_digests": _expected_runtime_images("self-run"),
+        "framework_image_digests": EXPECTED_FRAMEWORK_IMAGES,
         "manifest_digests": manifests["0"],
         "manifest_digests_by_shard": manifests,
         "release_manifests": EXPECTED_MANIFEST_SOURCES,
         "tool_images": EXPECTED_TOOL_IMAGES,
+        "results_sha256": "0" * 64,
         "timestamp": "2026-09-21T00:00:00Z",
         "github_actions": {
             "run_url": "https://github.com/onejumpinc/repo/actions/runs/1",
@@ -237,6 +244,7 @@ def _provenance() -> dict:
             "workflow_sha": "a" * 40,
             "job_workflow_ref": "onejumpinc/repo/.github/workflows/run.yml@refs/heads/release",
             "job_workflow_sha": "a" * 40,
+            "run_attempt": 1,
         },
     }
 
@@ -246,10 +254,11 @@ def _quick_provenance() -> dict:
     manifests = _expected_manifest_digests("generated")
     provenance["manifest_digests"] = manifests["0"]
     provenance["manifest_digests_by_shard"] = manifests
+    provenance["image_digests"] = _expected_runtime_images("generated")
     provenance["github_actions"] = {
         "run_url": "https://github.com/onejumpinc/officeqa-pro-v2-agentbeats/actions/runs/1",
         "ref": "refs/heads/main",
-        "sha": "d" * 40,
+        "sha": "c" * 40,
         "repository_url": "https://github.com/onejumpinc/officeqa-pro-v2-agentbeats",
         "workflow_ref": (
             "onejumpinc/officeqa-pro-v2-agentbeats/"
@@ -261,6 +270,7 @@ def _quick_provenance() -> dict:
             f".github/workflows/quick-submit-runner.yml@{'b' * 40}"
         ),
         "job_workflow_sha": "b" * 40,
+        "run_attempt": 1,
     }
     provenance["pull_request"] = {
         "number": 42,
@@ -274,6 +284,25 @@ def _quick_provenance() -> dict:
         "base_sha": "c" * 40,
     }
     return provenance
+
+
+def _workflow_run_blocks(workflow: str) -> list[str]:
+    lines = workflow.splitlines()
+    blocks: list[str] = []
+    for index, line in enumerate(lines):
+        if line.strip() != "run: |":
+            continue
+        indentation = len(line) - len(line.lstrip())
+        body: list[str] = []
+        for candidate in lines[index + 1 :]:
+            if (
+                candidate.strip()
+                and len(candidate) - len(candidate.lstrip()) <= indentation
+            ):
+                break
+            body.append(candidate)
+        blocks.append("\n".join(body))
+    return blocks
 
 
 def test_exact_scenario_result_and_provenance_pass(tmp_path: Path) -> None:
@@ -292,6 +321,124 @@ def test_exact_scenario_result_and_provenance_pass(tmp_path: Path) -> None:
 
 def test_agentbeats_generated_scenario_passes() -> None:
     verify_scenario(_generated_scenario())
+
+
+def test_quick_submit_can_require_generated_scenario_kind() -> None:
+    verify_scenario(_generated_scenario(), require_kind="generated")
+    with pytest.raises(ValueError, match="required exact kind"):
+        verify_scenario(_scenario(), require_kind="generated")
+
+
+def test_compiled_ir_and_runtime_images_are_exact() -> None:
+    shard_index = 7
+    manifests = _expected_manifest_digests("generated")[str(shard_index)]
+    compiled_images = _expected_compiled_images("generated")
+    ir = {
+        "components": [
+            {
+                "moniker": moniker,
+                "digest": digest,
+                "program": (
+                    {"image": compiled_images[moniker]}
+                    if moniker in compiled_images
+                    else None
+                ),
+            }
+            for moniker, digest in manifests.items()
+        ]
+    }
+    verify_compiled_ir(
+        ir,
+        scenario_kind="generated",
+        shard_index=shard_index,
+        runtime_images=_expected_runtime_images("generated"),
+    )
+
+    changed_images = {**_expected_runtime_images("generated"), "/gateway": "bad"}
+    with pytest.raises(ValueError, match="resolved runtime images"):
+        verify_compiled_ir(
+            ir,
+            scenario_kind="generated",
+            shard_index=shard_index,
+            runtime_images=changed_images,
+        )
+
+
+def test_compose_image_tags_are_replaced_by_exact_digests(tmp_path: Path) -> None:
+    compose = tmp_path / "compose.yaml"
+    lines = ["services:"]
+    service_index = 0
+    for image, count in _COMPOSE_SOURCE_IMAGE_COUNTS.items():
+        for _ in range(count):
+            lines.extend(
+                [
+                    f"  service-{service_index}:",
+                    f"    image: {image}",
+                ]
+            )
+            service_index += 1
+    compose.write_text("\n".join(lines) + "\n")
+    framework = tmp_path / "framework-images.json"
+
+    pin_compose_images(compose, framework)
+
+    pinned = compose.read_text()
+    for old, new in _COMPOSE_IMAGE_REPLACEMENTS.items():
+        if old != new:
+            assert f"image: {old}\n" not in pinned
+        assert f"image: {new}\n" in pinned
+    assert json.loads(framework.read_text()) == EXPECTED_FRAMEWORK_IMAGES
+
+
+def test_rendered_compose_requires_exact_image_multiset(tmp_path: Path) -> None:
+    services = {}
+    service_index = 0
+    for source_image, count in _COMPOSE_SOURCE_IMAGE_COUNTS.items():
+        for _ in range(count):
+            services[f"service-{service_index}"] = {
+                "image": _COMPOSE_IMAGE_REPLACEMENTS[source_image]
+            }
+            service_index += 1
+    rendered = tmp_path / "compose.json"
+    rendered.write_text(json.dumps({"services": services}))
+    verify_rendered_compose(rendered)
+
+    services["service-0"]["build"] = "."
+    rendered.write_text(json.dumps({"services": services}))
+    with pytest.raises(ValueError, match="build or extends"):
+        verify_rendered_compose(rendered)
+
+    del services["service-0"]["build"]
+    services["service-0"]["privileged"] = True
+    rendered.write_text(json.dumps({"services": services}))
+    with pytest.raises(ValueError, match="privileged"):
+        verify_rendered_compose(rendered)
+
+    del services["service-0"]["privileged"]
+    for field, value, message in (
+        ("network_mode", "host", "network namespace"),
+        ("devices", ["/dev/kvm"], "host devices"),
+        ("cap_add", ["SYS_ADMIN"], "unapproved capability"),
+        ("security_opt", ["seccomp=unconfined"], "security profile"),
+        (
+            "volumes",
+            [
+                {
+                    "type": "bind",
+                    "source": "/var/lib/docker/containers",
+                    "target": "/var/lib/docker/containers",
+                    "read_only": True,
+                }
+            ],
+            "unapproved host bind",
+        ),
+        ("ports", [{"host_ip": "0.0.0.0"}], "non-loopback port"),
+    ):
+        services["service-0"][field] = value
+        rendered.write_text(json.dumps({"services": services}))
+        with pytest.raises(ValueError, match=message):
+            verify_rendered_compose(rendered)
+        del services["service-0"][field]
 
 
 def test_compiled_generated_scenario_requires_exact_shard_and_local_manifests() -> None:
@@ -392,7 +539,7 @@ def test_result_rejects_missing_uid(tmp_path: Path) -> None:
 
 def test_provenance_rejects_changed_runtime_image() -> None:
     provenance = _provenance()
-    provenance["image_digests"]["/component-0"] = "changed@sha256:bad"
+    provenance["image_digests"]["/gateway"] = "changed@sha256:bad"
     with pytest.raises(ValueError, match="runtime image digests"):
         verify_provenance(provenance, scenario_kind="self-run")
 
@@ -427,7 +574,7 @@ def test_quick_submit_provenance_binds_event_caller_and_runner() -> None:
         expected_repository_url=(
             "https://github.com/onejumpinc/officeqa-pro-v2-agentbeats"
         ),
-        expected_github_sha="d" * 40,
+        expected_github_sha="c" * 40,
         expected_github_ref="refs/heads/main",
         expected_workflow_ref=(
             "onejumpinc/officeqa-pro-v2-agentbeats/"
@@ -444,6 +591,7 @@ def test_quick_submit_provenance_binds_event_caller_and_runner() -> None:
         expected_actor="agentbeats-dev[bot]",
         expected_head_repository="onejumpinc/officeqa-pro-v2-agentbeats",
         expected_base_sha="c" * 40,
+        expected_head_sha="d" * 40,
     )
 
     provenance["github_actions"]["job_workflow_sha"] = "e" * 40
@@ -453,6 +601,23 @@ def test_quick_submit_provenance_binds_event_caller_and_runner() -> None:
             provenance,
             scenario_kind="generated",
             expected_job_workflow_sha="b" * 40,
+        )
+
+
+def test_provenance_rejects_workflow_retry() -> None:
+    provenance = _provenance()
+    provenance["github_actions"]["run_attempt"] = 2
+    with pytest.raises(ValueError, match="run_attempt"):
+        verify_provenance(provenance, scenario_kind="self-run")
+
+
+def test_provenance_binds_exact_result_hash() -> None:
+    provenance = _provenance()
+    with pytest.raises(ValueError, match="result artifact"):
+        verify_provenance(
+            provenance,
+            scenario_kind="self-run",
+            expected_results_sha256="1" * 64,
         )
 
 
@@ -480,12 +645,35 @@ def test_public_workflows_gate_before_any_result_write() -> None:
         "Create submission branch and commit results"
     )
     assert quick_run.index("Verify exact 90/90 release") < quick_run.index(
-        "Commit results"
+        "Create verified result commit without a worktree"
     )
-    assert quick_run.count("ref: ${{ github.event.pull_request.head.sha }}") == 3
-    assert 'git push origin "HEAD:refs/heads/${GITHUB_HEAD_REF}"' in quick_run
-    assert "RELEASE_GATE_REF: 75f1d418ef25dcb6a49d55df567be93f68e3a9a7" in quick_run
-    assert quick_run.count(".release-gate/tools/verify_exact_result.py") == 2
+    assert "ref: ${{ github.event.pull_request.head.sha }}" not in quick_run
+    assert "git checkout" not in quick_run
+    assert quick_run.count("ref: ${{ inputs.trusted_runner_sha }}") == 3
+    assert quick_run.count("quick_submit_tree.py materialize") == 3
+    assert "--require-kind generated" in quick_run
+    assert "Compare-and-swap verified result commit" in quick_run
+    assert "always() && github.run_attempt == 1" in quick_run
+    assert "needs.setup.outputs.submission_id != ''" in quick_run
+    assert "create_credentials_file: false" in quick_run
+    assert "export_environment_variables: false" in quick_run
+    assert "access_token_lifetime: 300s" in quick_run
+    assert "verify_exact_result.py compose" in quick_run
+    assert "verify_exact_result.py compose-config" in quick_run
+    assert "github.run_attempt == 1" in quick_run
+    assert quick_run.count("run_attempt: '1'") == 3
+    assert quick_run.index(
+        "Validate exact workflow identity before executing release tools"
+    ) < quick_run.index("Checkout trusted release tools", quick_run.index("  eval:"))
+    assert "inputs.backend_url" not in quick_run
+    assert "vars.QUICK_SUBMIT" not in quick_run
+    assert "printf 'token=%s" not in quick_run
+    assert "release-artifact/results.json" in quick_run
+    assert ".release-gate/tools/docker_release_wrapper.sh" in quick_run
+    assert "Authenticate to GHCR" not in quick_run
+    assert "docker-amber-cli" in quick_run
+    assert "docker-runtime-images" in quick_run
+    assert all("${{" not in block for block in _workflow_run_blocks(quick_run))
     assert ".release-gate/tools/fetch_pinned_dataset.py" in quick_run
 
 

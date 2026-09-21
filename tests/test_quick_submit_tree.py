@@ -119,6 +119,31 @@ def test_rejects_any_second_changed_path(
 def test_rejects_noncanonical_uuid() -> None:
     with pytest.raises(tree_gate.GateError, match="invalid Quick Submit UUID"):
         tree_gate._validate_uuid("-" * 36)
+    with pytest.raises(tree_gate.GateError, match="invalid Quick Submit UUID"):
+        tree_gate._validate_uuid(SUBMISSION_ID.upper())
+
+
+def test_rejects_submission_not_based_on_exact_event_base(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source, _, head_sha = _submission_repository(tmp_path)
+    _git(source, "checkout", "main")
+    (source / "README.md").write_text("advanced base\n")
+    _git(source, "add", "README.md")
+    _git(source, "commit", "-m", "advance base")
+    advanced_base = _git(source, "rev-parse", "HEAD")
+    repository_url = source.as_uri()
+    monkeypatch.setattr(tree_gate, "EXPECTED_REPOSITORY_URL", repository_url)
+
+    with pytest.raises(tree_gate.GateError, match="exact pull request base"):
+        tree_gate.materialize_submission(
+            repo_dir=tmp_path / "bare.git",
+            repository_url=repository_url,
+            head_sha=head_sha,
+            base_sha=advanced_base,
+            submission_id=SUBMISSION_ID,
+            output=tmp_path / "scenario.release.json",
+        )
 
 
 def test_creates_direct_child_commit_without_a_worktree(
@@ -152,3 +177,84 @@ def test_creates_direct_child_commit_without_a_worktree(
         )
         == '{"timestamp":"2026-09-21T00:00:00Z"}'
     )
+
+
+def test_push_is_compare_and_swap_against_exact_event_head(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source, base_sha, head_sha = _submission_repository(tmp_path)
+    remote = tmp_path / "remote.git"
+    subprocess.run(
+        ["git", "clone", "--bare", str(source), str(remote)],
+        check=True,
+        capture_output=True,
+    )
+    repository_url = remote.as_uri()
+    monkeypatch.setattr(tree_gate, "EXPECTED_REPOSITORY_URL", repository_url)
+    repo_dir, _ = _materialize(
+        monkeypatch, tmp_path / "materialized", remote, base_sha, head_sha
+    )
+    result = tmp_path / "results.json"
+    provenance = tmp_path / "provenance.json"
+    result.write_text('{"status":"completed"}\n')
+    provenance.write_text('{"timestamp":"2026-09-21T00:00:00Z"}\n')
+    commit = tree_gate.create_results_commit(
+        repo_dir=repo_dir,
+        head_sha=head_sha,
+        submission_id=SUBMISSION_ID,
+        result=result,
+        provenance=provenance,
+    )
+
+    tree_gate.push_results_commit(
+        repo_dir=repo_dir,
+        repository_url=repository_url,
+        head_sha=head_sha,
+        submission_id=SUBMISSION_ID,
+        commit_sha=commit,
+        token="test-token",
+    )
+    branch = f"refs/heads/quick-submit-{SUBMISSION_ID}"
+    assert _git(remote, "rev-parse", branch) == commit
+
+    _git(remote, "update-ref", branch, head_sha)
+    competing_tree = _git(remote, "rev-parse", f"{head_sha}^{{tree}}")
+    competing = subprocess.run(
+        ["git", f"--git-dir={remote}", "commit-tree", competing_tree, "-p", head_sha],
+        input="competing commit\n",
+        text=True,
+        check=True,
+        capture_output=True,
+        env={
+            **os.environ,
+            "GIT_AUTHOR_NAME": "Test",
+            "GIT_AUTHOR_EMAIL": "test@example.com",
+            "GIT_COMMITTER_NAME": "Test",
+            "GIT_COMMITTER_EMAIL": "test@example.com",
+        },
+    ).stdout.strip()
+    _git(remote, "update-ref", branch, competing)
+
+    with pytest.raises(tree_gate.GateError, match="git push"):
+        tree_gate.push_results_commit(
+            repo_dir=repo_dir,
+            repository_url=repository_url,
+            head_sha=head_sha,
+            submission_id=SUBMISSION_ID,
+            commit_sha=commit,
+            token="test-token",
+        )
+
+    # A plain push from the event head's parent would fast-forward successfully.
+    # The exact lease must still reject it because the remote no longer equals
+    # the event head SHA.
+    _git(remote, "update-ref", branch, base_sha)
+    with pytest.raises(tree_gate.GateError, match="git push"):
+        tree_gate.push_results_commit(
+            repo_dir=repo_dir,
+            repository_url=repository_url,
+            head_sha=head_sha,
+            submission_id=SUBMISSION_ID,
+            commit_sha=commit,
+            token="test-token",
+        )

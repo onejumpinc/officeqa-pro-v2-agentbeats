@@ -8,8 +8,10 @@ import csv
 import hashlib
 import json
 import math
+import os
 import re
 import sys
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -59,19 +61,23 @@ AMBER_CLI_IMAGE = (
     "ghcr.io/rdi-foundation/amber-cli@"
     "sha256:3514b6cf27896e8cc9a148e8ebdc96ae5a15fe36deec69b7250ab25e126511ca"
 )
+GATEWAY_COMPILED_IMAGE = "ghcr.io/rdi-foundation/agentbeats-gateway:v0.3"
+GATEWAY_RUNTIME_IMAGE = (
+    "ghcr.io/rdi-foundation/agentbeats-gateway@"
+    "sha256:3f9976889c598092dc4273312ec431cbc48bbe064ff65b5613425f4990bc1d4c"
+)
+GREEN_RUNTIME_IMAGE = (
+    "ghcr.io/onejumpinc/officeqa-pro-v2-benchmark@"
+    "sha256:79db435c4a563090391fcbc3b9b656850efc3a04746de6e20982c39702740ff7"
+)
+PURPLE_RUNTIME_IMAGE = (
+    "ghcr.io/onejumpinc/officeqa-proxy-agent@"
+    "sha256:7a6d2d64b9a582b0a57460d13ecb5ef4641afdac8d71d864007c2ce7380ce8fa"
+)
 EXPECTED_IMAGES = {
-    (
-        "ghcr.io/rdi-foundation/agentbeats-gateway@"
-        "sha256:3f9976889c598092dc4273312ec431cbc48bbe064ff65b5613425f4990bc1d4c"
-    ),
-    (
-        "ghcr.io/onejumpinc/officeqa-pro-v2-benchmark@"
-        "sha256:79db435c4a563090391fcbc3b9b656850efc3a04746de6e20982c39702740ff7"
-    ),
-    (
-        "ghcr.io/onejumpinc/officeqa-proxy-agent@"
-        "sha256:7a6d2d64b9a582b0a57460d13ecb5ef4641afdac8d71d864007c2ce7380ce8fa"
-    ),
+    GATEWAY_RUNTIME_IMAGE,
+    GREEN_RUNTIME_IMAGE,
+    PURPLE_RUNTIME_IMAGE,
 }
 EXPECTED_MANIFEST_SOURCES = {
     "gateway": {
@@ -88,6 +94,61 @@ EXPECTED_MANIFEST_SOURCES = {
     },
 }
 EXPECTED_TOOL_IMAGES = {"amber_cli": AMBER_CLI_IMAGE}
+EXPECTED_FRAMEWORK_IMAGES = {
+    "amber_control_curl": (
+        "curlimages/curl@"
+        "sha256:94e9e444bcba979c2ea12e27ae39bee4cd10bc7041a472c4727a558e213744e6"
+    ),
+    "amber_helper": (
+        "ghcr.io/rdi-foundation/amber-helper@"
+        "sha256:135c9ec8b7ff5670d28a1b7b081571843e46605051ffea7adb36f5694265d905"
+    ),
+    "amber_otelcol": (
+        "otel/opentelemetry-collector-contrib@"
+        "sha256:3bc07732530c87c53f9103b01a3afed972fdeba26087a590c1098781736e58c2"
+    ),
+    "amber_provisioner": (
+        "ghcr.io/rdi-foundation/amber-provisioner@"
+        "sha256:c17f4496f5cd9750155224d79bfc35ff48ec215dd83e8031a8c75694c76cb113"
+    ),
+    "amber_router": (
+        "ghcr.io/rdi-foundation/amber-router@"
+        "sha256:5406fcb7c5d944f46c31b0131b37e14951fd7336fe71d24ee1a18b62f91e1482"
+    ),
+    "busybox": (
+        "busybox@"
+        "sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
+    ),
+}
+
+_COMPOSE_SOURCE_IMAGE_COUNTS = {
+    "${AMBER_OTELCOL_IMAGE:-otel/opentelemetry-collector-contrib:0.143.0}": 1,
+    "busybox:1.36.1": 1,
+    GATEWAY_COMPILED_IMAGE: 1,
+    GREEN_RUNTIME_IMAGE: 1,
+    PURPLE_RUNTIME_IMAGE: 1,
+    "ghcr.io/rdi-foundation/amber-helper:v0.3": 4,
+    "ghcr.io/rdi-foundation/amber-provisioner:v0.1": 1,
+    "ghcr.io/rdi-foundation/amber-router:v0.1": 4,
+}
+_COMPOSE_IMAGE_REPLACEMENTS = {
+    "${AMBER_OTELCOL_IMAGE:-otel/opentelemetry-collector-contrib:0.143.0}": (
+        EXPECTED_FRAMEWORK_IMAGES["amber_otelcol"]
+    ),
+    "busybox:1.36.1": EXPECTED_FRAMEWORK_IMAGES["busybox"],
+    GATEWAY_COMPILED_IMAGE: GATEWAY_RUNTIME_IMAGE,
+    GREEN_RUNTIME_IMAGE: GREEN_RUNTIME_IMAGE,
+    PURPLE_RUNTIME_IMAGE: PURPLE_RUNTIME_IMAGE,
+    "ghcr.io/rdi-foundation/amber-helper:v0.3": EXPECTED_FRAMEWORK_IMAGES[
+        "amber_helper"
+    ],
+    "ghcr.io/rdi-foundation/amber-provisioner:v0.1": EXPECTED_FRAMEWORK_IMAGES[
+        "amber_provisioner"
+    ],
+    "ghcr.io/rdi-foundation/amber-router:v0.1": EXPECTED_FRAMEWORK_IMAGES[
+        "amber_router"
+    ],
+}
 
 _CHILD_MANIFEST_DIGESTS = {
     "gateway": "sha256:Ba99ymNGSymbrF9jGwLfnZaSnzPrw9sTJ5veaYMxV2Q=",
@@ -140,6 +201,30 @@ def _expected_manifest_digests(kind: str) -> dict[str, dict[str, str]]:
     return {str(index): {"/": root, **children} for index, root in enumerate(roots)}
 
 
+def _expected_compiled_images(kind: str) -> dict[str, str]:
+    if kind == "generated":
+        return {
+            "/agent": PURPLE_RUNTIME_IMAGE,
+            "/gateway": GATEWAY_COMPILED_IMAGE,
+            "/green": GREEN_RUNTIME_IMAGE,
+        }
+    if kind == "self-run":
+        return {
+            "/gateway": GATEWAY_COMPILED_IMAGE,
+            "/officeqa_pro_v2_green": GREEN_RUNTIME_IMAGE,
+            "/opencode_agent": PURPLE_RUNTIME_IMAGE,
+        }
+    raise ValueError(f"unknown scenario kind: {kind!r}")
+
+
+def _expected_runtime_images(kind: str) -> dict[str, str]:
+    expected = _expected_compiled_images(kind)
+    return {
+        moniker: GATEWAY_RUNTIME_IMAGE if image == GATEWAY_COMPILED_IMAGE else image
+        for moniker, image in expected.items()
+    }
+
+
 UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
     re.IGNORECASE,
@@ -147,6 +232,11 @@ UUID_RE = re.compile(
 MANIFEST_DIGEST_RE = re.compile(r"^sha256:[A-Za-z0-9+/]{43}=$")
 GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+COMPOSE_IMAGE_RE = re.compile(
+    r"^(?P<prefix>[ \t]+image:[ \t]+)(?P<image>[^ \t\r\n]+)(?P<suffix>[ \t]*)$",
+    re.MULTILINE,
+)
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -177,6 +267,165 @@ def _sha256(path: Path) -> str:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def pin_compose_images(compose_path: Path, framework_output: Path) -> None:
+    """Replace every compiler-emitted mutable image tag with an exact digest."""
+    if compose_path.is_symlink() or not compose_path.is_file():
+        raise ValueError("compiled Compose file must be a regular non-symlink file")
+    source = compose_path.read_text(encoding="utf-8")
+    source_counts = Counter(
+        match.group("image") for match in COMPOSE_IMAGE_RE.finditer(source)
+    )
+    if source_counts != Counter(_COMPOSE_SOURCE_IMAGE_COUNTS):
+        raise ValueError(
+            "compiled Compose image references differ from the exact compiler output"
+        )
+
+    def replace_image(match: re.Match[str]) -> str:
+        image = match.group("image")
+        replacement = _COMPOSE_IMAGE_REPLACEMENTS.get(image)
+        if replacement is None:
+            raise ValueError("compiled Compose contains an unapproved image reference")
+        return f"{match.group('prefix')}{replacement}{match.group('suffix')}"
+
+    pinned = COMPOSE_IMAGE_RE.sub(replace_image, source)
+    expected_pinned_counts: Counter[str] = Counter()
+    for image, count in _COMPOSE_SOURCE_IMAGE_COUNTS.items():
+        expected_pinned_counts[_COMPOSE_IMAGE_REPLACEMENTS[image]] += count
+    pinned_counts = Counter(
+        match.group("image") for match in COMPOSE_IMAGE_RE.finditer(pinned)
+    )
+    if pinned_counts != expected_pinned_counts:
+        raise ValueError("pinned Compose image references are not exact")
+
+    temporary = compose_path.with_name(f".{compose_path.name}.pinned.tmp")
+    with temporary.open("x", encoding="utf-8") as handle:
+        handle.write(pinned)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, compose_path)
+
+    with framework_output.open("x", encoding="utf-8") as handle:
+        json.dump(
+            EXPECTED_FRAMEWORK_IMAGES, handle, sort_keys=True, separators=(",", ":")
+        )
+        handle.write("\n")
+
+
+def verify_rendered_compose(rendered_path: Path) -> None:
+    """Verify Docker Compose resolved only the exact digest-pinned services."""
+    rendered = _load_json(rendered_path)
+    if "include" in rendered:
+        raise ValueError("rendered Compose configuration must not contain include")
+    services = _mapping(rendered.get("services"), "rendered Compose services")
+    if not services:
+        raise ValueError("rendered Compose configuration has no services")
+
+    top_level_volumes = _mapping(
+        rendered.get("volumes", {}), "rendered Compose volumes"
+    )
+    for name, raw_volume in top_level_volumes.items():
+        volume = _mapping(raw_volume, f"rendered Compose volume {name}")
+        if volume.get("driver_opts"):
+            raise ValueError(f"rendered Compose volume {name} uses driver options")
+    top_level_configs = _mapping(
+        rendered.get("configs", {}), "rendered Compose configs"
+    )
+    for name, raw_config in top_level_configs.items():
+        config = _mapping(raw_config, f"rendered Compose config {name}")
+        if "file" in config or config.get("external"):
+            raise ValueError(f"rendered Compose config {name} reads an external file")
+    if rendered.get("secrets"):
+        raise ValueError("rendered Compose configuration must not define secrets")
+
+    actual_images: Counter[str] = Counter()
+    for name, raw_service in services.items():
+        service = _mapping(raw_service, f"rendered Compose service {name}")
+        if "build" in service or "extends" in service:
+            raise ValueError(f"rendered Compose service {name} uses build or extends")
+        image = service.get("image")
+        if not isinstance(image, str) or not image:
+            raise ValueError(f"rendered Compose service {name} has no exact image")
+        actual_images[image] += 1
+
+        if service.get("privileged") is True:
+            raise ValueError(f"rendered Compose service {name} is privileged")
+        network_mode = service.get("network_mode")
+        if network_mode == "host" or (
+            isinstance(network_mode, str) and network_mode.startswith("container:")
+        ):
+            raise ValueError(
+                f"rendered Compose service {name} uses an external network namespace"
+            )
+        for namespace in ("cgroup", "ipc", "pid", "userns_mode", "uts"):
+            mode = service.get(namespace)
+            if mode == "host" or (
+                isinstance(mode, str) and mode.startswith("container:")
+            ):
+                raise ValueError(
+                    f"rendered Compose service {name} uses external {namespace}"
+                )
+        if service.get("devices"):
+            raise ValueError(f"rendered Compose service {name} exposes host devices")
+        if service.get("device_cgroup_rules") or service.get("volumes_from"):
+            raise ValueError(
+                f"rendered Compose service {name} inherits host device or volume access"
+            )
+        security_options = service.get("security_opt", [])
+        if not isinstance(security_options, list) or any(
+            not isinstance(option, str) or "unconfined" in option
+            for option in security_options
+        ):
+            raise ValueError(
+                f"rendered Compose service {name} disables a security profile"
+            )
+        capabilities = service.get("cap_add", [])
+        if not isinstance(capabilities, list) or not set(capabilities) <= {"NET_ADMIN"}:
+            raise ValueError(
+                f"rendered Compose service {name} adds an unapproved capability"
+            )
+        if "docker.sock" in json.dumps(service, sort_keys=True):
+            raise ValueError(
+                f"rendered Compose service {name} exposes the Docker socket"
+            )
+
+        volumes = service.get("volumes", [])
+        if not isinstance(volumes, list):
+            raise TypeError(f"rendered Compose service {name} volumes are invalid")
+        for volume in volumes:
+            if not isinstance(volume, dict):
+                raise TypeError(
+                    f"rendered Compose service {name} has an invalid volume"
+                )
+            if volume.get("type") != "bind":
+                continue
+            if (
+                name != "amber-otelcol"
+                or volume.get("source") != "/var/lib/docker/containers"
+                or volume.get("target") != "/var/lib/docker/containers"
+                or volume.get("read_only") is not True
+            ):
+                raise ValueError(
+                    f"rendered Compose service {name} has an unapproved host bind"
+                )
+
+        ports = service.get("ports", [])
+        if not isinstance(ports, list):
+            raise TypeError(f"rendered Compose service {name} ports are invalid")
+        for port in ports:
+            if not isinstance(port, dict) or port.get("host_ip") != "127.0.0.1":
+                raise ValueError(
+                    f"rendered Compose service {name} publishes a non-loopback port"
+                )
+
+    expected_images: Counter[str] = Counter()
+    for image, count in _COMPOSE_SOURCE_IMAGE_COUNTS.items():
+        expected_images[_COMPOSE_IMAGE_REPLACEMENTS[image]] += count
+    if actual_images != expected_images:
+        raise ValueError(
+            "rendered Compose service images are not the exact release set"
+        )
 
 
 def load_dataset(
@@ -558,6 +807,7 @@ def verify_scenario(
     *,
     expected_shard_index: int | None = None,
     compile_manifests: bool = False,
+    require_kind: str | None = None,
 ) -> None:
     expected_top_level = {
         "manifest_version",
@@ -572,6 +822,10 @@ def verify_scenario(
         raise ValueError("scenario top-level fields are not exact")
     components = _mapping(scenario.get("components"), "scenario.components")
     kind = scenario_kind(scenario)
+    if require_kind is not None and kind != require_kind:
+        raise ValueError(
+            f"scenario kind is {kind!r}, required exact kind is {require_kind!r}"
+        )
     if kind == "self-run":
         _verify_self_run_scenario(
             scenario,
@@ -588,6 +842,56 @@ def verify_scenario(
         )
     else:
         raise AssertionError(f"unhandled scenario kind: {kind}")
+
+
+def verify_compiled_ir(
+    ir: dict[str, Any],
+    *,
+    scenario_kind: str,
+    shard_index: int,
+    runtime_images: dict[str, Any] | None = None,
+) -> None:
+    """Verify compiler output and, when supplied, resolved runtime images."""
+    if isinstance(shard_index, bool) or not 0 <= shard_index < EXPECTED_SHARDS:
+        raise ValueError("compiled IR shard index is invalid")
+    components = ir.get("components")
+    if not isinstance(components, list):
+        raise TypeError("compiled IR components must be an array")
+
+    manifest_digests: dict[str, str] = {}
+    compiled_images: dict[str, str] = {}
+    for raw_component in components:
+        component = _mapping(raw_component, "compiled IR component")
+        moniker = component.get("moniker")
+        digest = component.get("digest")
+        if not isinstance(moniker, str) or not moniker:
+            raise ValueError("compiled IR component moniker is missing")
+        if moniker in manifest_digests:
+            raise ValueError(f"compiled IR contains duplicate component {moniker!r}")
+        if not isinstance(digest, str):
+            raise TypeError(f"compiled IR digest is missing for {moniker!r}")
+        manifest_digests[moniker] = digest
+
+        program = component.get("program")
+        if program is not None:
+            program_mapping = _mapping(program, f"compiled IR program {moniker}")
+            image = program_mapping.get("image")
+            if not isinstance(image, str) or not image:
+                raise ValueError(f"compiled IR image is missing for {moniker!r}")
+            compiled_images[moniker] = image
+
+    expected_manifests = _expected_manifest_digests(scenario_kind)[str(shard_index)]
+    if manifest_digests != expected_manifests:
+        raise ValueError(
+            "compiled IR manifest digests differ from the exact release shard"
+        )
+    if compiled_images != _expected_compiled_images(scenario_kind):
+        raise ValueError("compiled IR program images differ from the exact release set")
+
+    if runtime_images is not None and runtime_images != _expected_runtime_images(
+        scenario_kind
+    ):
+        raise ValueError("resolved runtime images differ from the exact release set")
 
 
 def verify_artifact(
@@ -726,14 +1030,18 @@ def verify_provenance(
     expected_actor: str | None = None,
     expected_head_repository: str | None = None,
     expected_base_sha: str | None = None,
+    expected_head_sha: str | None = None,
+    expected_results_sha256: str | None = None,
 ) -> None:
     quick_submit = expected_submission_id is not None
     expected_top_level = {
         "image_digests",
+        "framework_image_digests",
         "manifest_digests",
         "manifest_digests_by_shard",
         "release_manifests",
         "tool_images",
+        "results_sha256",
         "timestamp",
         "github_actions",
     }
@@ -743,16 +1051,29 @@ def verify_provenance(
         raise ValueError("provenance top-level fields are not exact")
 
     images = _mapping(provenance.get("image_digests"), "provenance.image_digests")
-    actual_images = set(images.values())
-    if actual_images != EXPECTED_IMAGES or len(images) != len(EXPECTED_IMAGES):
+    expected_images = _expected_runtime_images(scenario_kind)
+    if images != expected_images:
         raise ValueError(
             "runtime image digests differ from the exact release set: "
-            f"got={sorted(actual_images)}"
+            f"got={sorted(images.values())}"
         )
+
+    framework_images = _mapping(
+        provenance.get("framework_image_digests"),
+        "provenance.framework_image_digests",
+    )
+    if framework_images != EXPECTED_FRAMEWORK_IMAGES:
+        raise ValueError("framework runtime images differ from the exact release set")
 
     tool_images = _mapping(provenance.get("tool_images"), "provenance.tool_images")
     if tool_images != EXPECTED_TOOL_IMAGES:
         raise ValueError("release tool images differ from the exact pinned set")
+
+    results_sha256 = provenance.get("results_sha256")
+    if not isinstance(results_sha256, str) or not SHA256_RE.fullmatch(results_sha256):
+        raise ValueError("provenance results_sha256 is not a lowercase SHA-256")
+    if expected_results_sha256 and results_sha256 != expected_results_sha256:
+        raise ValueError("provenance results_sha256 does not match the result artifact")
 
     release_manifests = _mapping(
         provenance.get("release_manifests"), "provenance.release_manifests"
@@ -795,12 +1116,15 @@ def verify_provenance(
         "workflow_sha",
         "job_workflow_ref",
         "job_workflow_sha",
+        "run_attempt",
     }
     if set(actions) != action_keys:
         raise ValueError("provenance.github_actions fields are not exact")
-    for key in action_keys:
+    for key in action_keys - {"run_attempt"}:
         if not isinstance(actions.get(key), str) or not actions[key]:
             raise ValueError(f"provenance.github_actions.{key} is missing")
+    if isinstance(actions.get("run_attempt"), bool) or actions.get("run_attempt") != 1:
+        raise ValueError("provenance run_attempt must be exactly 1")
     if expected_run_url and actions["run_url"] != expected_run_url:
         raise ValueError("provenance run_url does not identify this workflow run")
     if expected_repository_url and actions["repository_url"] != expected_repository_url:
@@ -835,6 +1159,7 @@ def verify_provenance(
                 expected_head_repository,
                 expected_github_sha,
                 expected_base_sha,
+                expected_head_sha,
             )
         ):
             raise ValueError("quick-submit provenance expectations are incomplete")
@@ -849,7 +1174,7 @@ def verify_provenance(
             "actor": expected_actor,
             "author": expected_actor,
             "head_ref": f"quick-submit-{expected_submission_id}",
-            "head_sha": expected_github_sha,
+            "head_sha": expected_head_sha,
             "head_repository": expected_head_repository,
             "base_ref": "main",
             "base_sha": expected_base_sha,
@@ -857,7 +1182,8 @@ def verify_provenance(
         if pull_request != expected_pull_request:
             raise ValueError("pull-request provenance does not match the trusted event")
         for label, value in (
-            ("head SHA", expected_github_sha),
+            ("head SHA", expected_head_sha),
+            ("GitHub SHA", expected_github_sha),
             ("base SHA", expected_base_sha),
             ("workflow SHA", actions["workflow_sha"]),
             ("job workflow SHA", actions["job_workflow_sha"]),
@@ -874,12 +1200,34 @@ def _parser() -> argparse.ArgumentParser:
     scenario_parser.add_argument("--scenario", type=Path, required=True)
     scenario_parser.add_argument("--expected-shard-index", type=int)
     scenario_parser.add_argument("--compile-manifests", action="store_true")
+    scenario_parser.add_argument("--require-kind", choices=("generated", "self-run"))
+
+    ir_parser = subparsers.add_parser("ir", help="verify compiled release IR")
+    ir_parser.add_argument("--ir", type=Path, required=True)
+    ir_parser.add_argument(
+        "--scenario-kind", choices=("generated", "self-run"), required=True
+    )
+    ir_parser.add_argument("--shard-index", type=int, required=True)
+    ir_parser.add_argument("--runtime-images", type=Path)
+    ir_parser.add_argument("--write-runtime-images", type=Path)
+
+    compose_parser = subparsers.add_parser(
+        "compose", help="pin compiler-emitted Compose images"
+    )
+    compose_parser.add_argument("--compose", type=Path, required=True)
+    compose_parser.add_argument("--framework-images", type=Path, required=True)
+
+    compose_config_parser = subparsers.add_parser(
+        "compose-config", help="verify rendered digest-pinned Compose services"
+    )
+    compose_config_parser.add_argument("--rendered-compose", type=Path, required=True)
 
     result_parser = subparsers.add_parser("result", help="verify exact public result")
     result_parser.add_argument("--artifact", type=Path, required=True)
     result_parser.add_argument("--dataset", type=Path, required=True)
     result_parser.add_argument("--provenance", type=Path, required=True)
     result_parser.add_argument("--scenario", type=Path, required=True)
+    result_parser.add_argument("--require-kind", choices=("generated", "self-run"))
     result_parser.add_argument("--expected-run-url")
     result_parser.add_argument("--expected-repository-url")
     result_parser.add_argument("--expected-github-sha")
@@ -893,17 +1241,50 @@ def _parser() -> argparse.ArgumentParser:
     result_parser.add_argument("--expected-actor")
     result_parser.add_argument("--expected-head-repository")
     result_parser.add_argument("--expected-base-sha")
+    result_parser.add_argument("--expected-head-sha")
     return parser
 
 
 def main() -> int:
     args = _parser().parse_args()
     try:
+        if args.command == "compose":
+            pin_compose_images(args.compose, args.framework_images)
+            print("PASS: every Compose image is pinned to the exact release digest")
+            return 0
+        if args.command == "compose-config":
+            verify_rendered_compose(args.rendered_compose)
+            print("PASS: rendered Compose services use the exact release images")
+            return 0
+        if args.command == "ir":
+            runtime_images = (
+                _load_json(args.runtime_images) if args.runtime_images else None
+            )
+            verify_compiled_ir(
+                _load_json(args.ir),
+                scenario_kind=args.scenario_kind,
+                shard_index=args.shard_index,
+                runtime_images=runtime_images,
+            )
+            if args.write_runtime_images:
+                with args.write_runtime_images.open("x", encoding="utf-8") as handle:
+                    json.dump(
+                        _expected_runtime_images(args.scenario_kind),
+                        handle,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    handle.write("\n")
+            detail = " and runtime images" if runtime_images is not None else ""
+            print(f"PASS: compiled IR{detail} match the exact release")
+            return 0
+
         scenario = _load_json(args.scenario)
         verify_scenario(
             scenario,
             expected_shard_index=getattr(args, "expected_shard_index", None),
             compile_manifests=getattr(args, "compile_manifests", False),
+            require_kind=getattr(args, "require_kind", None),
         )
         if args.command == "result":
             kind = scenario_kind(scenario)
@@ -929,6 +1310,8 @@ def main() -> int:
                 expected_actor=args.expected_actor,
                 expected_head_repository=args.expected_head_repository,
                 expected_base_sha=args.expected_base_sha,
+                expected_head_sha=args.expected_head_sha,
+                expected_results_sha256=_sha256(args.artifact),
             )
     except (OSError, TypeError, json.JSONDecodeError, ValueError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)

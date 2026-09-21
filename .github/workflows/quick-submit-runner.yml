@@ -5,28 +5,37 @@ name: Quick-Submit Amber Runner
 on:
   workflow_call:
     inputs:
-      backend_url:
-        description: Agentbeats backend base URL for this quick-submit run
-        required: false
-        type: string
       num_shards:
         description: >-
           Must resolve to exactly 10 for the scored OfficeQA Pro v2 release.
-        required: false
+        required: true
         type: number
+      trusted_runner_sha:
+        description: Full commit SHA used by the caller to pin this reusable workflow.
+        required: true
+        type: string
     secrets:
       GREEN_SECRETS_JSON:
         description: Optional JSON object mapping green config key -> secret value.
         required: false
 
 env:
-  RELEASE_GATE_REF: 75f1d418ef25dcb6a49d55df567be93f68e3a9a7
+  AGENTBEATS_URL: https://agentbeats.dev
+  OIDC_AUDIENCE: agentbeats-quick-submit-production
+  GCP_WIF_PROVIDER: projects/352582078246/locations/global/workloadIdentityPools/agentbeats-prod/providers/github
+  GCP_SERVICE_ACCOUNT: agentbeats-prod-quick-submit@komyo-agentbeats.iam.gserviceaccount.com
   RELEASE_GATEWAY_MANIFEST: https://raw.githubusercontent.com/RDI-Foundation/agentbeats-gateway/ca6dd30904f98bfdfbff2f79fb035e854c93a8d3/amber-manifest.json5
   RELEASE_GATEWAY_MANIFEST_SHA256: 0ef4afd064263eaacddf0fc93bb735fffce999491b96b2dccebb573f3847c6f9
   RELEASE_GREEN_MANIFEST: https://raw.githubusercontent.com/onejumpinc/officeqa-pro-v2-agentbeats/9ac7f2c39d16e13b2e10ddb3f73c63cdc9d278ad/green-agent.json5
   RELEASE_GREEN_MANIFEST_SHA256: 019d98d164d479c77724dda4c20809df0ad1229b97b097893d9a98909f577946
   RELEASE_PURPLE_MANIFEST: https://raw.githubusercontent.com/onejumpinc/officeqa-agentbeats/d376c66f2be259674704ae4cc71df1fe3c9b54ce/amber-manifest.json5
   RELEASE_PURPLE_MANIFEST_SHA256: 7175137be7a12305c47f0535f7ece1130dace1bc2537ebd0bcc849021579b4c5
+  AMBER_IMAGE: ghcr.io/rdi-foundation/amber-cli@sha256:3514b6cf27896e8cc9a148e8ebdc96ae5a15fe36deec69b7250ab25e126511ca
+  EXPECTED_KMS_KEY_ID: projects/komyo-agentbeats/locations/us-central1/keyRings/agentbeats-prod-kms/cryptoKeys/quick-submit/cryptoKeyVersions/1
+
+concurrency:
+  group: officeqa-quick-submit-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
 
 jobs:
   setup:
@@ -36,101 +45,134 @@ jobs:
     outputs:
       num_shards: ${{ steps.config.outputs.num_shards }}
       shard_indices: ${{ steps.gen.outputs.shard_indices }}
-      scenario_path: ${{ steps.scenario.outputs.path }}
-      scenario_base: ${{ steps.scenario.outputs.base }}
-      submission_id: ${{ steps.submission.outputs.submission_id }}
+      submission_id: ${{ steps.identity.outputs.submission_id }}
+      head_sha: ${{ steps.identity.outputs.head_sha }}
+      base_sha: ${{ steps.identity.outputs.base_sha }}
+      head_ref: ${{ steps.identity.outputs.head_ref }}
     steps:
-      - name: Require same-repository quick-submit branch
+      - name: Require trusted Quick Submit event and runner
+        id: identity
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          EVENT_ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EVENT_REF: ${{ github.ref }}
+          CALLER_WORKFLOW_REF: ${{ github.workflow_ref }}
+          CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          EXPECTED_RUNNER_SHA: ${{ inputs.trusted_runner_sha }}
         run: |
           set -euo pipefail
-          if [[ "${HEAD_REPOSITORY}" != "${GITHUB_REPOSITORY}" ]]; then
-            echo "Quick Submit must use an AgentBeats branch in this repository" >&2
+          expected_actor='agentbeats-dev[bot]'
+          expected_runner_repository='onejumpinc/officeqa-pro-v2-agentbeats'
+          expected_caller_ref="${GITHUB_REPOSITORY}/.github/workflows/quick-submit.yml@refs/heads/main"
+          uuid_pattern='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+
+          if [[ "${EVENT_NAME}" != "pull_request_target" || "${EVENT_ACTION}" != "opened" ]]; then
+            echo "Quick Submit requires an opened base-controlled pull_request_target event" >&2
             exit 1
           fi
+          if [[ "${RUN_ATTEMPT}" != "1" ]]; then
+            echo "Quick Submit release runs cannot be retried" >&2
+            exit 1
+          fi
+          if [[ "${EVENT_ACTOR}" != "${expected_actor}" ||
+                "${TRIGGERING_ACTOR}" != "${expected_actor}" ||
+                "${PR_AUTHOR}" != "${expected_actor}" ]]; then
+            echo "Quick Submit must be opened and triggered by ${expected_actor}" >&2
+            exit 1
+          fi
+          if [[ "${HEAD_REPOSITORY}" != "${GITHUB_REPOSITORY}" ||
+                "${GITHUB_REPOSITORY}" != "${expected_runner_repository}" ||
+                "${BASE_REF}" != "main" || "${EVENT_REF}" != "refs/heads/main" ||
+                "${CALLER_WORKFLOW_REF}" != "${expected_caller_ref}" ||
+                "${CALLER_WORKFLOW_SHA}" != "${BASE_SHA}" ]]; then
+            echo "Quick Submit must use an AgentBeats branch in this repository targeting main" >&2
+            exit 1
+          fi
+          if [[ ! "${HEAD_REF}" =~ ^quick-submit-(${uuid_pattern})$ ]]; then
+            echo "Quick Submit branch does not contain a canonical lowercase UUID" >&2
+            exit 1
+          fi
+          submission_id="${BASH_REMATCH[1]}"
+          if [[ ! "${HEAD_SHA}" =~ ^[0-9a-f]{40}$ ||
+                ! "${BASE_SHA}" =~ ^[0-9a-f]{40}$ ||
+                ! "${EXPECTED_RUNNER_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Quick Submit requires full lowercase Git SHAs" >&2
+            exit 1
+          fi
+          echo "submission_id=${submission_id}" >> "${GITHUB_OUTPUT}"
+          echo "head_sha=${HEAD_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "base_sha=${BASE_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "head_ref=${HEAD_REF}" >> "${GITHUB_OUTPUT}"
 
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-
-      - name: Checkout immutable release gate
-        uses: actions/checkout@v6
+      - name: Checkout trusted release tools
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           repository: onejumpinc/officeqa-pro-v2-agentbeats
-          ref: ${{ env.RELEASE_GATE_REF }}
+          ref: ${{ inputs.trusted_runner_sha }}
           path: .release-gate
           sparse-checkout: tools
           persist-credentials: false
 
-      - name: Resolve submission ID
-        id: submission
-        shell: bash
-        run: |
-          set -euo pipefail
-          ref_name="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-}}"
-          if [[ "$ref_name" =~ ^quick-submit-([0-9a-fA-F-]{36})$ ]]; then
-            echo "submission_id=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "Unable to derive submission ID from branch: $ref_name" >&2
-          exit 1
-
-      - name: Find scenario file
-        id: scenario
-        shell: bash
+      - name: Materialize the exact submitted scenario blob
         env:
-          SUBMISSION_ID: ${{ steps.submission.outputs.submission_id }}
+          REPOSITORY_URL: ${{ github.server_url }}/${{ github.repository }}.git
+          HEAD_SHA: ${{ steps.identity.outputs.head_sha }}
+          BASE_SHA: ${{ steps.identity.outputs.base_sha }}
+          SUBMISSION_ID: ${{ steps.identity.outputs.submission_id }}
         run: |
           set -euo pipefail
-          scenario=$(ls submissions/*"${SUBMISSION_ID}"*.json 2>/dev/null | grep -v provenance | head -1)
-          if [[ -z "$scenario" ]]; then
-            echo "No scenario file found for submission ${SUBMISSION_ID}" >&2
-            exit 1
-          fi
-          base=$(basename "$scenario" .json)
-          echo "path=$scenario" >> "$GITHUB_OUTPUT"
-          echo "base=$base" >> "$GITHUB_OUTPUT"
+          python3 .release-gate/tools/quick_submit_tree.py materialize \
+            --repo-dir "${RUNNER_TEMP}/submission.git" \
+            --repository-url "${REPOSITORY_URL}" \
+            --head-sha "${HEAD_SHA}" \
+            --base-sha "${BASE_SHA}" \
+            --submission-id "${SUBMISSION_ID}" \
+            --output "${RUNNER_TEMP}/scenario.release.json"
 
       - name: Resolve shard count
         id: config
         shell: bash
         env:
           INPUT_NUM_SHARDS: ${{ inputs.num_shards || '' }}
-          SCENARIO_PATH: ${{ steps.scenario.outputs.path }}
+          SCENARIO_PATH: ${{ runner.temp }}/scenario.release.json
         run: |
           set -euo pipefail
 
-          scenario_num_shards="$(jq -r '.components.gateway.config.assessment_config.num_shards' "${SCENARIO_PATH}")"
-          if [[ "${scenario_num_shards}" != "null" ]]; then
-            num_shards="${scenario_num_shards}"
-          elif [[ -n "${INPUT_NUM_SHARDS}" ]]; then
-            num_shards="${INPUT_NUM_SHARDS}"
-          else
-            num_shards=1
-          fi
-
-          if [[ "${num_shards}" != "10" ]]; then
-            echo "Public OfficeQA Pro v2 results require exactly 10 shards; got ${num_shards}" >&2
+          scenario_num_shards="$(jq -er \
+            '.components.gateway.config.assessment_config.num_shards |
+             select(type == "number" and floor == .)' "${SCENARIO_PATH}")"
+          if [[ "${scenario_num_shards}" != "10" || "${INPUT_NUM_SHARDS}" != "10" ]]; then
+            echo "Public OfficeQA Pro v2 results require exactly 10 shards" >&2
             exit 1
           fi
 
-          echo "num_shards=${num_shards}" >> "$GITHUB_OUTPUT"
+          echo "num_shards=10" >> "$GITHUB_OUTPUT"
 
       - name: Verify exact full-release scenario
         env:
-          SCENARIO_PATH: ${{ steps.scenario.outputs.path }}
+          SCENARIO_PATH: ${{ runner.temp }}/scenario.release.json
         run: |
           set -euo pipefail
           python3 .release-gate/tools/verify_exact_result.py scenario \
-            --scenario "${SCENARIO_PATH}"
+            --scenario "${SCENARIO_PATH}" \
+            --require-kind generated
 
       - name: Verify immutable release manifests
         run: |
           set -euo pipefail
           verify_manifest() {
             local label="$1" url="$2" expected="$3" actual
-            actual=$(curl -fsSL --retry 3 "$url" | sha256sum | cut -d' ' -f1)
+            actual=$(curl -fsSL --retry 3 --proto '=https' --proto-redir '=https' \
+              --tlsv1.2 --max-time 60 "$url" | sha256sum | cut -d' ' -f1)
             if [[ "$actual" != "$expected" ]]; then
               echo "$label manifest SHA-256 mismatch: $actual" >&2
               exit 1
@@ -141,10 +183,13 @@ jobs:
           verify_manifest purple "$RELEASE_PURPLE_MANIFEST" "$RELEASE_PURPLE_MANIFEST_SHA256"
 
       - id: gen
-        run: echo "shard_indices=$(seq 0 $(( ${{ steps.config.outputs.num_shards }} - 1 )) | jq -sc .)" >> "$GITHUB_OUTPUT"
+        env:
+          NUM_SHARDS: ${{ steps.config.outputs.num_shards }}
+        run: echo "shard_indices=$(seq 0 $(( NUM_SHARDS - 1 )) | jq -sc .)" >> "$GITHUB_OUTPUT"
 
   eval:
     needs: setup
+    if: ${{ github.run_attempt == 1 && github.triggering_actor == 'agentbeats-dev[bot]' }}
     runs-on: ubuntu-latest
     timeout-minutes: 330
     strategy:
@@ -159,17 +204,73 @@ jobs:
 
     env:
       NUM_SHARDS: ${{ needs.setup.outputs.num_shards }}
-      AGENTBEATS_URL: ${{ inputs.backend_url || vars.QUICK_SUBMIT_BACKEND_URL || 'https://agentbeats.dev' }}
-      OIDC_AUDIENCE: ${{ vars.QUICK_SUBMIT_OIDC_AUDIENCE || 'agentbeats-quick-submit-production' }}
-      GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER || 'projects/352582078246/locations/global/workloadIdentityPools/agentbeats-prod/providers/github' }}
-      GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT || 'agentbeats-prod-quick-submit@komyo-agentbeats.iam.gserviceaccount.com' }}
-      AMBER_IMAGE: ghcr.io/rdi-foundation/amber-cli:v0.3
       AMBER_COMPOSE_DIR: amber-compose
       AMBER_COMPOSE_PROJECT: amber-qs-${{ github.run_id }}-${{ github.run_attempt }}-shard-${{ matrix.shard_index }}
       AMBER_PROXY_PORT: "18080"
-      RESULTS_TIMEOUT_MINUTES: ${{ vars.QUICK_SUBMIT_TIMEOUT_MINUTES || '300' }}
+      RESULTS_TIMEOUT_MINUTES: "285"
 
     steps:
+      - name: Validate exact workflow identity before executing release tools
+        shell: bash
+        env:
+          EXPECTED_ACTOR: agentbeats-dev[bot]
+          EXPECTED_HEAD_REF: ${{ needs.setup.outputs.head_ref }}
+          EXPECTED_BASE_SHA: ${{ needs.setup.outputs.base_sha }}
+          EXPECTED_RUNNER_SHA: ${{ inputs.trusted_runner_sha }}
+          EXPECTED_REPOSITORY_ID: ${{ github.repository_id }}
+          EXPECTED_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          encoded_audience="$(jq -rn --arg value "${OIDC_AUDIENCE}" '$value | @uri')"
+          oidc_response="$(
+            printf 'Authorization: Bearer %s\n' "${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" |
+              curl -fsS --proto '=https' --tlsv1.2 --max-time 60 -H @- \
+                "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${encoded_audience}"
+          )"
+          oidc_token="$(jq -er '.value | select(type == "string" and length > 0)' \
+            <<<"${oidc_response}")"
+          echo "::add-mask::${oidc_token}"
+          OIDC_TOKEN="${oidc_token}" node - <<'NODE'
+          const token = process.env.OIDC_TOKEN;
+          const parts = token.split('.');
+          if (parts.length !== 3) throw new Error('GitHub OIDC token is not a JWT');
+          let claims;
+          try {
+            claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+          } catch {
+            throw new Error('GitHub OIDC token has invalid claims JSON');
+          }
+          const expectedRunnerRef =
+            `${process.env.GITHUB_REPOSITORY}/.github/workflows/` +
+            `quick-submit-runner.yml@${process.env.EXPECTED_RUNNER_SHA}`;
+          const expectedWorkflowRef =
+            `${process.env.GITHUB_REPOSITORY}/.github/workflows/` +
+            'quick-submit.yml@refs/heads/main';
+          const expected = {
+            aud: process.env.OIDC_AUDIENCE,
+            repository: process.env.GITHUB_REPOSITORY,
+            repository_id: process.env.EXPECTED_REPOSITORY_ID,
+            event_name: 'pull_request_target',
+            actor: process.env.EXPECTED_ACTOR,
+            head_ref: process.env.EXPECTED_HEAD_REF,
+            base_ref: 'main',
+            ref: 'refs/heads/main',
+            sha: process.env.EXPECTED_BASE_SHA,
+            workflow_ref: expectedWorkflowRef,
+            workflow_sha: process.env.EXPECTED_BASE_SHA,
+            job_workflow_ref: expectedRunnerRef,
+            job_workflow_sha: process.env.EXPECTED_RUNNER_SHA,
+            run_id: process.env.EXPECTED_RUN_ID,
+            run_attempt: '1',
+            runner_environment: 'github-hosted',
+          };
+          for (const [key, value] of Object.entries(expected)) {
+            if (claims[key] !== value) {
+              throw new Error(`GitHub OIDC claim ${key} does not match the release gate`);
+            }
+          }
+          NODE
+
       - name: Free disk space
         # GitHub-hosted runners ship with ~20-30 GB of pre-installed toolchains
         # (.NET, Android SDK, GraalVM, Chromium, etc.) not needed.
@@ -182,101 +283,414 @@ jobs:
           sudo docker image prune -af 2>/dev/null || true
           echo "After: $(df -h / | tail -1 | awk '{print $4}') free"
 
-      - uses: actions/checkout@v6
+      - name: Checkout trusted release tools
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          repository: onejumpinc/officeqa-pro-v2-agentbeats
+          ref: ${{ inputs.trusted_runner_sha }}
+          path: .release-gate
+          sparse-checkout: tools
+          persist-credentials: false
 
-      - name: Authenticate to GHCR
+      - name: Materialize the exact submitted scenario blob
+        env:
+          REPOSITORY_URL: ${{ github.server_url }}/${{ github.repository }}.git
+          HEAD_SHA: ${{ needs.setup.outputs.head_sha }}
+          BASE_SHA: ${{ needs.setup.outputs.base_sha }}
+          SUBMISSION_ID: ${{ needs.setup.outputs.submission_id }}
+        run: |
+          set -euo pipefail
+          python3 .release-gate/tools/quick_submit_tree.py materialize \
+            --repo-dir "${RUNNER_TEMP}/submission.git" \
+            --repository-url "${REPOSITORY_URL}" \
+            --head-sha "${HEAD_SHA}" \
+            --base-sha "${BASE_SHA}" \
+            --submission-id "${SUBMISSION_ID}" \
+            --output "${RUNNER_TEMP}/scenario.release.json"
+
+      - name: Materialize verified release manifests
+        run: |
+          set -euo pipefail
+          install -d release-manifests
+          fetch_manifest() {
+            local label="$1" url="$2" expected="$3" destination="$4" actual
+            curl --fail --silent --show-error --location --retry 3 \
+              --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 60 \
+              "${url}" -o "${destination}.tmp"
+            actual=$(sha256sum "${destination}.tmp" | cut -d' ' -f1)
+            if [[ "${actual}" != "${expected}" ]]; then
+              echo "${label} manifest SHA-256 mismatch: ${actual}" >&2
+              exit 1
+            fi
+            mv "${destination}.tmp" "${destination}"
+          }
+          fetch_manifest gateway "${RELEASE_GATEWAY_MANIFEST}" \
+            "${RELEASE_GATEWAY_MANIFEST_SHA256}" release-manifests/gateway.json5
+          fetch_manifest green "${RELEASE_GREEN_MANIFEST}" \
+            "${RELEASE_GREEN_MANIFEST_SHA256}" release-manifests/green.json5
+          fetch_manifest purple "${RELEASE_PURPLE_MANIFEST}" \
+            "${RELEASE_PURPLE_MANIFEST_SHA256}" release-manifests/purple.json5
+
+      - name: Install Amber CLI
+        shell: bash
         env:
           GHCR_TOKEN: ${{ github.token }}
+          DOCKER_CONFIG: ${{ runner.temp }}/docker-amber-cli
         run: |
           set -euo pipefail
+          if [[ "${DOCKER_CONFIG}" != "${RUNNER_TEMP}/docker-amber-cli" ]]; then
+            echo "Unexpected Docker credential directory" >&2
+            exit 1
+          fi
+          install -d -m 700 "${DOCKER_CONFIG}"
+          cid=""
+          cleanup() {
+            [[ -z "${cid}" ]] || docker rm "${cid}" >/dev/null 2>&1 || true
+            docker logout ghcr.io >/dev/null 2>&1 || true
+            rm -f -- "${DOCKER_CONFIG}/config.json"
+            rmdir -- "${DOCKER_CONFIG}" 2>/dev/null || true
+          }
+          trap cleanup EXIT
           printf '%s' "${GHCR_TOKEN}" | docker login ghcr.io \
             --username "${GITHUB_ACTOR}" --password-stdin
+          docker pull "${AMBER_IMAGE}"
+          if ! docker image inspect "${AMBER_IMAGE}" --format '{{json .RepoDigests}}' |
+            jq -e --arg expected "${AMBER_IMAGE}" 'index($expected) != null' >/dev/null; then
+            echo "Pulled Amber CLI does not expose the exact release digest" >&2
+            exit 1
+          fi
+          cid="$(docker create "${AMBER_IMAGE}")"
+          install -d "${RUNNER_TEMP}/bin"
+          real_docker="$(command -v docker)"
+          if [[ ! "${real_docker}" = /* || ! -x "${real_docker}" ]]; then
+            echo "GitHub runner Docker binary is not an exact executable path" >&2
+            exit 1
+          fi
+          docker cp "${cid}:/amber" "${RUNNER_TEMP}/bin/amber"
+          chmod +x "${RUNNER_TEMP}/bin/amber"
+          install -m 755 .release-gate/tools/docker_release_wrapper.sh \
+            "${RUNNER_TEMP}/bin/docker"
+          install -m 755 .release-gate/tools/docker_release_wrapper.sh \
+            "${RUNNER_TEMP}/bin/podman"
+          echo "AGENTBEATS_REAL_DOCKER_BIN=${real_docker}" >> "${GITHUB_ENV}"
+          echo "${RUNNER_TEMP}/bin" >> "${GITHUB_PATH}"
+          env -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL \
+            "${RUNNER_TEMP}/bin/amber" --help >/dev/null
 
-      # Secrets (OIDC → backend → GCP KMS → decrypt).
-      # Skipped when no backend is configured (e.g. test repos using GREEN_SECRETS_JSON).
-      - name: Fetch GitHub OIDC token
-        id: oidc
-        shell: bash
+      - name: Patch shard config into scenario
+        env:
+          SCENARIO_PATH: ${{ runner.temp }}/scenario.release.json
+          SHARD_INDEX: ${{ matrix.shard_index }}
         run: |
           set -euo pipefail
-          oidc_response="$(curl -fsS \
-            -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${OIDC_AUDIENCE}")"
-          oidc_token="$(jq -r '.value' <<<"$oidc_response")"
-          if [[ -z "$oidc_token" || "$oidc_token" == "null" ]]; then
-            echo "Failed to fetch OIDC token" >&2; exit 1
-          fi
-          echo "::add-mask::$oidc_token"
-          echo "token=$oidc_token" >> "$GITHUB_OUTPUT"
+          jq --argjson shard_index "${SHARD_INDEX}" \
+             --argjson num_shards "${NUM_SHARDS}" \
+             --arg gateway_manifest "${RELEASE_GATEWAY_MANIFEST}" \
+             --arg green_manifest "${RELEASE_GREEN_MANIFEST}" \
+             --arg purple_manifest "${RELEASE_PURPLE_MANIFEST}" \
+            '
+             .components.gateway.manifest = $gateway_manifest |
+             .components.green.manifest = $green_manifest |
+             .components.agent.manifest = $purple_manifest |
+             .components.gateway.config.assessment_config.shard_index = $shard_index |
+             .components.gateway.config.assessment_config.num_shards = $num_shards |
+             del(.components.gateway.config.assessment_config.num_instances)
+            ' \
+            "${SCENARIO_PATH}" > patched-source.json
+          python3 .release-gate/tools/verify_exact_result.py scenario \
+            --scenario patched-source.json \
+            --expected-shard-index "${SHARD_INDEX}" \
+            --require-kind generated
 
-      - name: Fetch secrets bundle
-        id: bundle
+          jq '
+            .components.gateway.manifest = "release-manifests/gateway.json5" |
+            .components.green.manifest = "release-manifests/green.json5" |
+            .components.agent.manifest = "release-manifests/purple.json5"
+          ' patched-source.json > compile-scenario.json
+          python3 .release-gate/tools/verify_exact_result.py scenario \
+            --scenario compile-scenario.json \
+            --expected-shard-index "${SHARD_INDEX}" \
+            --compile-manifests \
+            --require-kind generated
+
+      - name: Compile and verify exact scenario IR before loading secrets
+        shell: bash
+        env:
+          SHARD_INDEX: ${{ matrix.shard_index }}
+        run: |
+          set -euo pipefail
+          if [[ -e "${AMBER_COMPOSE_DIR}" ]]; then
+            echo "Amber compose output path unexpectedly exists" >&2
+            exit 1
+          fi
+          env -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL \
+            amber compile compile-scenario.json \
+            --output scenario-ir.json \
+            --docker-compose "${AMBER_COMPOSE_DIR}"
+          if [[ -e "${AMBER_COMPOSE_DIR}/.env" ]]; then
+            echo "Compiler output must not contain a Compose .env file" >&2
+            exit 1
+          fi
+          if ! jq -e '.exports[] | select(.name == "results" and .capability.kind == "http")' scenario-ir.json > /dev/null; then
+            echo "Scenario must export an HTTP capability named 'results'" >&2
+            exit 1
+          fi
+          python3 .release-gate/tools/verify_exact_result.py ir \
+            --ir scenario-ir.json \
+            --scenario-kind generated \
+            --shard-index "${SHARD_INDEX}" \
+            --write-runtime-images runtime-images.json
+          if jq -e '.components[].program?.mounts[]? | select(.capability == "kvm")' scenario-ir.json > /dev/null; then
+            echo "Scenario uses framework.kvm; exporting AMBER_KVM_GID to Docker Compose"
+            echo "AMBER_KVM_GID=$(stat -c %g /dev/kvm)" >> "${GITHUB_ENV}"
+          else
+            echo "Scenario does not use framework.kvm"
+          fi
+          python3 .release-gate/tools/verify_exact_result.py compose \
+            --compose "${AMBER_COMPOSE_DIR}/compose.yaml" \
+            --framework-images framework-images.json
+
+          empty_env_file="${RUNNER_TEMP}/empty-compose.env"
+          install -m 600 /dev/null "${empty_env_file}"
+          env \
+            -u ACTIONS_ID_TOKEN_REQUEST_TOKEN \
+            -u ACTIONS_ID_TOKEN_REQUEST_URL \
+            AMBER_CONFIG_GREEN_HF_TOKEN=preflight \
+            AMBER_CONFIG_AGENT_OFFICEQA_API_URL=https://preflight.invalid \
+            AMBER_CONFIG_AGENT_OFFICEQA_API_TOKEN=preflight \
+            docker compose --env-file "${empty_env_file}" \
+              -f "${AMBER_COMPOSE_DIR}/compose.yaml" \
+              -p "${AMBER_COMPOSE_PROJECT}" config --format json \
+              > rendered-compose.json
+          rm -f "${empty_env_file}"
+          python3 .release-gate/tools/verify_exact_result.py compose-config \
+            --rendered-compose rendered-compose.json
+
+      - name: Pull and verify every runtime image before loading secrets
+        shell: bash
+        env:
+          SHARD_INDEX: ${{ matrix.shard_index }}
+          GHCR_TOKEN: ${{ github.token }}
+          DOCKER_CONFIG: ${{ runner.temp }}/docker-runtime-images
+        run: |
+          set -euo pipefail
+          if [[ "${DOCKER_CONFIG}" != "${RUNNER_TEMP}/docker-runtime-images" ]]; then
+            echo "Unexpected Docker credential directory" >&2
+            exit 1
+          fi
+          install -d -m 700 "${DOCKER_CONFIG}"
+          logout_ghcr() {
+            docker logout ghcr.io >/dev/null 2>&1 || true
+            rm -f -- "${DOCKER_CONFIG}/config.json"
+            rmdir -- "${DOCKER_CONFIG}" 2>/dev/null || true
+          }
+          trap logout_ghcr EXIT
+          printf '%s' "${GHCR_TOKEN}" | docker login ghcr.io \
+            --username "${GITHUB_ACTOR}" --password-stdin
+          if [[ ! "${RESULTS_TIMEOUT_MINUTES}" =~ ^[0-9]+$ ]] ||
+             (( RESULTS_TIMEOUT_MINUTES < 1 || RESULTS_TIMEOUT_MINUTES > 285 )); then
+            echo "RESULTS_TIMEOUT_MINUTES must be an integer from 1 through 285" >&2
+            exit 1
+          fi
+          compose=(docker compose -f "${AMBER_COMPOSE_DIR}/compose.yaml" -p "${AMBER_COMPOSE_PROJECT}")
+          env \
+            -u ACTIONS_ID_TOKEN_REQUEST_TOKEN \
+            -u ACTIONS_ID_TOKEN_REQUEST_URL \
+            AMBER_CONFIG_GREEN_HF_TOKEN=preflight \
+            AMBER_CONFIG_AGENT_OFFICEQA_API_URL=https://preflight.invalid \
+            AMBER_CONFIG_AGENT_OFFICEQA_API_TOKEN=preflight \
+            "${compose[@]}" pull --quiet
+
+          control_curl_image="$(jq -er '.amber_control_curl' framework-images.json)"
+          docker pull --quiet "${control_curl_image}"
+
+          python3 .release-gate/tools/verify_exact_result.py ir \
+            --ir scenario-ir.json \
+            --scenario-kind generated \
+            --shard-index "${SHARD_INDEX}" \
+            --runtime-images runtime-images.json
+
+          jq -s '.[0] + .[1]' runtime-images.json framework-images.json |
+            jq -r 'to_entries[] | [.key, .value] | @tsv' |
+          while IFS=$'\t' read -r label image; do
+            if ! docker image inspect "${image}" --format '{{json .RepoDigests}}' |
+              jq -e --arg expected "${image}" 'index($expected) != null' >/dev/null; then
+              echo "Runtime image ${label} does not expose its exact release digest" >&2
+              exit 1
+            fi
+          done
+
+          logout_ghcr
+          trap - EXIT
+
+      # Secrets (OIDC → backend → GCP KMS → decrypt).
+      - name: Fetch and validate encrypted secrets bundle
         shell: bash
         env:
           BACKEND_URL: ${{ env.AGENTBEATS_URL }}
           SUBMISSION_ID: ${{ needs.setup.outputs.submission_id }}
-          OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
+          EXPECTED_ACTOR: agentbeats-dev[bot]
+          EXPECTED_HEAD_REF: ${{ needs.setup.outputs.head_ref }}
+          EXPECTED_BASE_SHA: ${{ needs.setup.outputs.base_sha }}
+          EXPECTED_RUNNER_SHA: ${{ inputs.trusted_runner_sha }}
+          EXPECTED_REPOSITORY_ID: ${{ github.repository_id }}
+          EXPECTED_RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
-          secrets_url="${BACKEND_URL}/api/quick-submit/${SUBMISSION_ID}/secrets"
-          http_code="$(curl -sS -o secrets_response.json -w "%{http_code}" \
-            -H "Authorization: Bearer ${OIDC_TOKEN}" "$secrets_url" || true)"
-          if [[ "$http_code" != "200" ]]; then
-            echo "Backend returned HTTP ${http_code}:" >&2
-            cat secrets_response.json >&2; exit 1
+          if [[ "${BACKEND_URL}" != "https://agentbeats.dev" ||
+                "${OIDC_AUDIENCE}" != "agentbeats-quick-submit-production" ]]; then
+            echo "Quick Submit identity endpoints are not the frozen production values" >&2
+            exit 1
           fi
-          echo "secrets_blob_b64=$(jq -r '.secrets_blob' secrets_response.json)" >> "$GITHUB_OUTPUT"
-          echo "wrapped_dek_b64=$(jq -r '.wrapped_dek' secrets_response.json)" >> "$GITHUB_OUTPUT"
-          echo "iv_b64=$(jq -r '.metadata.iv' secrets_response.json)" >> "$GITHUB_OUTPUT"
-          echo "key_id=$(jq -r '.metadata.key_id' secrets_response.json)" >> "$GITHUB_OUTPUT"
+          encoded_audience="$(jq -rn --arg value "${OIDC_AUDIENCE}" '$value | @uri')"
+          oidc_response="$(
+            printf 'Authorization: Bearer %s\n' "${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" |
+              curl -fsS --proto '=https' --tlsv1.2 --max-time 60 -H @- \
+                "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${encoded_audience}"
+          )"
+          oidc_token="$(jq -er '.value | select(type == "string" and length > 0)' \
+            <<<"${oidc_response}")"
+          echo "::add-mask::${oidc_token}"
+          OIDC_TOKEN="${oidc_token}" node - <<'NODE'
+          const token = process.env.OIDC_TOKEN;
+          const parts = token.split('.');
+          if (parts.length !== 3) throw new Error('GitHub OIDC token is not a JWT');
+          let claims;
+          try {
+            claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+          } catch {
+            throw new Error('GitHub OIDC token has invalid claims JSON');
+          }
+          const expectedRunnerRef =
+            `${process.env.GITHUB_REPOSITORY}/.github/workflows/` +
+            `quick-submit-runner.yml@${process.env.EXPECTED_RUNNER_SHA}`;
+          const expectedWorkflowRef =
+            `${process.env.GITHUB_REPOSITORY}/.github/workflows/` +
+            'quick-submit.yml@refs/heads/main';
+          const expected = {
+            aud: process.env.OIDC_AUDIENCE,
+            repository: process.env.GITHUB_REPOSITORY,
+            repository_id: process.env.EXPECTED_REPOSITORY_ID,
+            event_name: 'pull_request_target',
+            actor: process.env.EXPECTED_ACTOR,
+            head_ref: process.env.EXPECTED_HEAD_REF,
+            base_ref: 'main',
+            ref: 'refs/heads/main',
+            sha: process.env.EXPECTED_BASE_SHA,
+            workflow_ref: expectedWorkflowRef,
+            workflow_sha: process.env.EXPECTED_BASE_SHA,
+            job_workflow_ref: expectedRunnerRef,
+            job_workflow_sha: process.env.EXPECTED_RUNNER_SHA,
+            run_id: process.env.EXPECTED_RUN_ID,
+            run_attempt: '1',
+            runner_environment: 'github-hosted',
+          };
+          for (const [key, value] of Object.entries(expected)) {
+            if (claims[key] !== value) {
+              throw new Error(`GitHub OIDC claim ${key} does not match the release gate`);
+            }
+          }
+          NODE
+
+          umask 077
+          encrypted_bundle="${RUNNER_TEMP}/encrypted-secrets.json"
+          if [[ -e "${encrypted_bundle}" ]]; then
+            echo "Encrypted secrets path unexpectedly exists" >&2
+            exit 1
+          fi
+          secrets_url="${BACKEND_URL}/api/quick-submit/${SUBMISSION_ID}/secrets"
+          http_code="$(
+            printf 'Authorization: Bearer %s\n' "${oidc_token}" |
+              curl -sS --proto '=https' --tlsv1.2 --max-time 60 \
+                -o "${encrypted_bundle}" -w "%{http_code}" \
+                -H @- "${secrets_url}" || true
+          )"
+          if [[ "${http_code}" != "200" ]]; then
+            rm -f "${encrypted_bundle}"
+            echo "Backend returned HTTP ${http_code}" >&2
+            exit 1
+          fi
+          secrets_blob_b64="$(jq -er '.secrets_blob | select(type == "string")' "${encrypted_bundle}")"
+          wrapped_dek_b64="$(jq -er '.wrapped_dek | select(type == "string")' "${encrypted_bundle}")"
+          iv_b64="$(jq -er '.metadata.iv | select(type == "string")' "${encrypted_bundle}")"
+          key_id="$(jq -er '.metadata.key_id | select(type == "string")' "${encrypted_bundle}")"
+          base64_pattern='^[A-Za-z0-9+/]+={0,2}$'
+          if [[ ! "${secrets_blob_b64}" =~ ${base64_pattern} ||
+                ! "${wrapped_dek_b64}" =~ ${base64_pattern} ||
+                ! "${iv_b64}" =~ ${base64_pattern} ||
+                "${key_id}" != "${EXPECTED_KMS_KEY_ID}" ]]; then
+            rm -f "${encrypted_bundle}"
+            echo "Backend secrets response does not match the exact encrypted-bundle schema" >&2
+            exit 1
+          fi
 
       - name: Authenticate to GCP
         id: gcp-auth
-        uses: google-github-actions/auth@v3
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
           workload_identity_provider: ${{ env.GCP_WIF_PROVIDER }}
           service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
           token_format: access_token
+          access_token_lifetime: 300s
+          create_credentials_file: false
+          export_environment_variables: false
 
-      - name: Unwrap DEK via KMS
-        id: dek
+      - name: Unwrap, decrypt, and stage exact submitter secrets
         shell: bash
         env:
           GCP_ACCESS_TOKEN: ${{ steps.gcp-auth.outputs.access_token }}
-          KMS_KEY_ID: ${{ steps.bundle.outputs.key_id }}
-          WRAPPED_DEK_B64: ${{ steps.bundle.outputs.wrapped_dek_b64 }}
+          SECRET_ENV_FILE: ${{ runner.temp }}/benchmark.env
         run: |
           set -euo pipefail
-          kms_url="https://cloudkms.googleapis.com/v1/${KMS_KEY_ID}:asymmetricDecrypt"
-          http_code="$(curl -sS -o kms_response.json -w "%{http_code}" \
-            -H "Authorization: Bearer ${GCP_ACCESS_TOKEN}" \
-            -H 'Content-Type: application/json' \
-            -d "{\"ciphertext\":\"${WRAPPED_DEK_B64}\"}" "$kms_url" || true)"
-          if [[ "$http_code" != "200" ]]; then
-            echo "KMS returned HTTP ${http_code}:" >&2
-            cat kms_response.json >&2; exit 1
+          encrypted_bundle="${RUNNER_TEMP}/encrypted-secrets.json"
+          if [[ ! -f "${encrypted_bundle}" || -L "${encrypted_bundle}" ]]; then
+            echo "Encrypted secrets bundle is missing or not a regular file" >&2
+            exit 1
           fi
-          dek_b64="$(jq -r '.plaintext' kms_response.json)"
-          echo "::add-mask::$dek_b64"
-          echo "dek_b64=$dek_b64" >> "$GITHUB_OUTPUT"
+          wrapped_dek_b64="$(jq -er '.wrapped_dek | select(type == "string")' "${encrypted_bundle}")"
+          iv_b64="$(jq -er '.metadata.iv | select(type == "string")' "${encrypted_bundle}")"
+          ciphertext_b64="$(jq -er '.secrets_blob | select(type == "string")' "${encrypted_bundle}")"
+          key_id="$(jq -er '.metadata.key_id | select(type == "string")' "${encrypted_bundle}")"
+          if [[ "${key_id}" != "${EXPECTED_KMS_KEY_ID}" ]]; then
+            echo "Encrypted secrets bundle names an unexpected KMS key" >&2
+            exit 1
+          fi
 
-      - name: Decrypt and export secrets
-        id: submitter-secrets
-        shell: bash
-        env:
-          DEK_B64: ${{ steps.dek.outputs.dek_b64 }}
-          IV_B64: ${{ steps.bundle.outputs.iv_b64 }}
-          CIPHERTEXT_B64: ${{ steps.bundle.outputs.secrets_blob_b64 }}
-        run: |
-          set -euo pipefail
+          kms_response="$(mktemp "${RUNNER_TEMP}/kms-response.XXXXXX")"
+          cleanup_sensitive_files() {
+            rm -f "${kms_response}" "${encrypted_bundle}"
+          }
+          trap cleanup_sensitive_files EXIT
+          kms_url="https://cloudkms.googleapis.com/v1/${EXPECTED_KMS_KEY_ID}:asymmetricDecrypt"
+          request_body="$(jq -nc --arg ciphertext "${wrapped_dek_b64}" '{ciphertext: $ciphertext}')"
+          http_code="$(
+            printf 'Authorization: Bearer %s\nContent-Type: application/json\n' \
+              "${GCP_ACCESS_TOKEN}" |
+              curl -sS --proto '=https' --tlsv1.2 --max-time 60 \
+                -o "${kms_response}" -w "%{http_code}" -H @- \
+                -d "${request_body}" "${kms_url}" || true
+          )"
+          if [[ "${http_code}" != "200" ]]; then
+            echo "KMS returned HTTP ${http_code}" >&2
+            exit 1
+          fi
+          dek_b64="$(jq -er '.plaintext | select(type == "string")' "${kms_response}")"
+          if [[ ! "${dek_b64}" =~ ^[A-Za-z0-9+/]+={0,2}$ ]]; then
+            echo "KMS plaintext response is not canonical base64" >&2
+            exit 1
+          fi
+          echo "::add-mask::${dek_b64}"
+
+          DEK_B64="${dek_b64}" IV_B64="${iv_b64}" CIPHERTEXT_B64="${ciphertext_b64}" \
           node - <<'NODE'
           const crypto = require('crypto');
 
           const dek = Buffer.from(process.env.DEK_B64, 'base64');
           const iv = Buffer.from(process.env.IV_B64, 'base64');
           const ciphertextAndTag = Buffer.from(process.env.CIPHERTEXT_B64, 'base64');
+          if (dek.length !== 32 || iv.length !== 12 || ciphertextAndTag.length <= 16) {
+            throw new Error('encrypted secrets bundle has invalid AES-256-GCM dimensions');
+          }
 
           const tag = ciphertextAndTag.subarray(ciphertextAndTag.length - 16);
           const ciphertext = ciphertextAndTag.subarray(0, ciphertextAndTag.length - 16);
@@ -285,209 +699,205 @@ jobs:
           decipher.setAuthTag(tag);
           const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
 
-          const secrets = JSON.parse(plaintext.toString('utf8'));
           const fs = require('fs');
-          const envFile = process.env.GITHUB_ENV;
-          const keyPattern = /^[A-Za-z][A-Za-z0-9_]*$/;
+          let secrets;
+          try {
+            secrets = JSON.parse(plaintext.toString('utf8'));
+          } catch {
+            throw new Error('decrypted secrets payload is not valid JSON');
+          }
 
           if (!secrets || typeof secrets !== 'object' || Array.isArray(secrets)) {
             throw new Error('decrypted secrets payload must be an object');
           }
-          const greenSecrets = secrets.green ?? {};
-          const participants = secrets.participants ?? [];
+          const topLevelKeys = Object.keys(secrets).sort();
+          if (JSON.stringify(topLevelKeys) !== JSON.stringify(['green', 'participants'])) {
+            throw new Error('decrypted secrets payload fields are not exact');
+          }
+          const greenSecrets = secrets.green;
+          const participants = secrets.participants;
           if (!greenSecrets || typeof greenSecrets !== 'object' || Array.isArray(greenSecrets)) {
             throw new Error('decrypted green secrets must be an object');
           }
           if (!Array.isArray(participants)) {
             throw new Error('decrypted participants secrets must be an array');
           }
-
-          function appendEnv(name, value) {
-            let delimiter;
-            do {
-              delimiter = `__AGENTBEATS_${crypto.randomUUID()}__`;
-            } while (value.includes(delimiter));
-            fs.appendFileSync(envFile, `${name}<<${delimiter}\n${value}\n${delimiter}\n`);
+          if (Object.keys(greenSecrets).length !== 0) {
+            throw new Error('submitter-provided green secrets are forbidden for this release');
+          }
+          if (participants.length !== 1) {
+            throw new Error('this release requires exactly one participant secret entry');
           }
 
-          function exportSecret(key, value) {
-            if (!keyPattern.test(key)) {
-              throw new Error(
-                `invalid secret environment key ${JSON.stringify(key)}; ` +
-                'expected ^[A-Za-z][A-Za-z0-9_]*$'
-              );
+          function validateSecret(key, value) {
+            if (typeof value !== 'string' || value.length === 0 || value.trim() !== value) {
+              throw new Error(`secret ${key} must be a non-empty trimmed string`);
             }
-            if (typeof value !== 'string') {
-              throw new Error(`secret ${key} must be a string`);
+            if (/[\r\n\0']/.test(value)) {
+              throw new Error(`secret ${key} contains a forbidden dotenv character`);
             }
-            if (/[\r\n\0]/.test(value)) {
-              throw new Error(`secret ${key} must not contain CR, LF, or NUL characters`);
-            }
-            console.log(`::add-mask::${value}`);
-            appendEnv(`AMBER_CONFIG_${key.toUpperCase()}`, value);
           }
 
-          for (const [key, value] of Object.entries(greenSecrets)) {
-            exportSecret(`GREEN_${key}`, value);
+          function maskSecret(value) {
+            const escaped = value.replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A');
+            console.log(`::add-mask::${escaped}`);
           }
-          for (const participant of participants) {
-            if (!participant || typeof participant !== 'object' || Array.isArray(participant)) {
-              throw new Error('participant secret entry must be an object');
-            }
-            if (typeof participant.name !== 'string' || !keyPattern.test(participant.name)) {
-              throw new Error('participant secret name is invalid');
-            }
-            const participantSecrets = participant.secrets ?? {};
-            if (
-              !participantSecrets ||
-              typeof participantSecrets !== 'object' ||
-              Array.isArray(participantSecrets)
-            ) {
-              throw new Error(`participant ${participant.name} secrets must be an object`);
-            }
-            const prefix = participant.name;
-            for (const [key, value] of Object.entries(participantSecrets)) {
-              exportSecret(`${prefix}_${key}`, value);
-            }
-          }
-          const greenKeys = Object.keys(greenSecrets)
-            .map((key) => key.toLowerCase())
-            .sort();
-          const outputFile = process.env.GITHUB_OUTPUT;
-          fs.appendFileSync(outputFile, `green_keys_json=${JSON.stringify(greenKeys)}\n`);
 
-          console.log(`Exported ${Object.keys(greenSecrets).length} green secrets`);
-          console.log(`Exported secrets for ${participants.length} participants`);
+          const participant = participants[0];
+          if (!participant || typeof participant !== 'object' || Array.isArray(participant)) {
+            throw new Error('participant secret entry must be an object');
+          }
+          if (
+            JSON.stringify(Object.keys(participant).sort()) !==
+            JSON.stringify(['agent_id', 'name', 'secrets'])
+          ) {
+            throw new Error('participant secret entry fields are not exact');
+          }
+          if (participant.name !== 'agent') {
+            throw new Error('participant secret entry must be named agent');
+          }
+          if (participant.agent_id !== '01a05b80-58e6-7e71-95e9-656bde816e85') {
+            throw new Error('participant secret entry does not identify the pinned purple agent');
+          }
+          const participantSecrets = participant.secrets;
+          if (
+            !participantSecrets ||
+            typeof participantSecrets !== 'object' ||
+            Array.isArray(participantSecrets)
+          ) {
+            throw new Error('participant agent secrets must be an object');
+          }
+          const expectedParticipantKeys = ['OFFICEQA_API_TOKEN', 'OFFICEQA_API_URL'];
+          if (
+            JSON.stringify(Object.keys(participantSecrets).sort()) !==
+            JSON.stringify(expectedParticipantKeys)
+          ) {
+            throw new Error('participant agent secret keys are not exact');
+          }
+          for (const key of expectedParticipantKeys) {
+            validateSecret(key, participantSecrets[key]);
+            maskSecret(participantSecrets[key]);
+          }
+          let apiUrl;
+          try {
+            apiUrl = new URL(participantSecrets.OFFICEQA_API_URL);
+          } catch {
+            throw new Error('OFFICEQA_API_URL is not a valid URL');
+          }
+          if (
+            apiUrl.protocol !== 'https:' || apiUrl.username || apiUrl.password || apiUrl.hash
+          ) {
+            throw new Error('OFFICEQA_API_URL must be an HTTPS URL without credentials or a fragment');
+          }
+
+          const envFile = process.env.SECRET_ENV_FILE;
+          const fd = fs.openSync(envFile, 'wx', 0o600);
+          try {
+            const contents = expectedParticipantKeys.map((key) => (
+              `AMBER_CONFIG_AGENT_${key}='${participantSecrets[key]}'`
+            )).join('\n') + '\n';
+            fs.writeFileSync(fd, contents, {encoding: 'utf8'});
+          } finally {
+            fs.closeSync(fd);
+          }
+
+          console.log('Staged the exact two participant secrets');
           NODE
 
-      - name: Export repo-owned green secrets
+      - name: Stage repo-owned green secret
         shell: bash
         env:
           GREEN_SECRETS_JSON: ${{ secrets.GREEN_SECRETS_JSON }}
-          SUBMITTER_GREEN_KEYS_JSON: ${{ steps.submitter-secrets.outputs.green_keys_json }}
+          SECRET_ENV_FILE: ${{ runner.temp }}/benchmark.env
         run: |
           set -euo pipefail
           node - <<'NODE'
-          const crypto = require('crypto');
           const fs = require('fs');
 
           const raw = process.env.GREEN_SECRETS_JSON?.trim();
           if (!raw) {
-            console.log('No repo-owned green secrets configured');
-            process.exit(0);
+            throw new Error('GREEN_SECRETS_JSON is required for the exact release');
           }
 
           let greenSecrets;
           try {
             greenSecrets = JSON.parse(raw);
-          } catch (error) {
-            throw new Error(`GREEN_SECRETS_JSON must be valid JSON: ${error.message}`);
+          } catch {
+            throw new Error('GREEN_SECRETS_JSON must be valid JSON');
           }
           if (!greenSecrets || typeof greenSecrets !== 'object' || Array.isArray(greenSecrets)) {
             throw new Error('GREEN_SECRETS_JSON must be a JSON object');
           }
-
-          const submitterGreenKeys = new Set(
-            JSON.parse(process.env.SUBMITTER_GREEN_KEYS_JSON || '[]').map((key) =>
-              String(key).toLowerCase()
-            )
-          );
-          const envFile = process.env.GITHUB_ENV;
-          const configKeyPattern = /^[a-z][a-z0-9_]*$/;
-
-          function appendEnv(name, value) {
-            let delimiter;
-            do {
-              delimiter = `__AGENTBEATS_${crypto.randomUUID()}__`;
-            } while (value.includes(delimiter));
-            fs.appendFileSync(envFile, `${name}<<${delimiter}\n${value}\n${delimiter}\n`);
+          if (JSON.stringify(Object.keys(greenSecrets)) !== JSON.stringify(['hf_token'])) {
+            throw new Error('GREEN_SECRETS_JSON must contain only hf_token');
           }
-
-          let exportCount = 0;
-          for (const [configKey, value] of Object.entries(greenSecrets)) {
-            if (!configKeyPattern.test(configKey)) {
-              throw new Error(
-                `invalid green config key ${JSON.stringify(configKey)}; expected ^[a-z][a-z0-9_]*$`
-              );
-            }
-            if (typeof value !== 'string') {
-              throw new Error(`GREEN_SECRETS_JSON value for green.${configKey} must be a string`);
-            }
-            if (submitterGreenKeys.has(configKey)) {
-              throw new Error(
-                `repo-owned binding for green.${configKey} collides with a submitter-provided green secret`
-              );
-            }
-            console.log(`::add-mask::${value}`);
-            appendEnv(`AMBER_CONFIG_GREEN_${configKey.toUpperCase()}`, value);
-            exportCount += 1;
+          const value = greenSecrets.hf_token;
+          if (
+            typeof value !== 'string' || value.length === 0 || value.trim() !== value ||
+            /[\r\n\0']/.test(value)
+          ) {
+            throw new Error('GREEN_SECRETS_JSON hf_token is not an exact dotenv-safe string');
           }
-
-          console.log(`Exported ${exportCount} repo-owned green secrets`);
+          const escaped = value.replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A');
+          console.log(`::add-mask::${escaped}`);
+          const envFile = process.env.SECRET_ENV_FILE;
+          const metadata = fs.lstatSync(envFile);
+          if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o777) !== 0o600) {
+            throw new Error('benchmark secret env file is not an exact mode-0600 regular file');
+          }
+          fs.appendFileSync(envFile, `AMBER_CONFIG_GREEN_HF_TOKEN='${value}'\n`, {
+            encoding: 'utf8',
+            flag: 'a',
+          });
+          console.log('Staged the exact repo-owned green secret');
           NODE
-
-      - name: Install Amber CLI
-        shell: bash
-        run: |
-          set -euo pipefail
-          docker pull "${AMBER_IMAGE}"
-          cid="$(docker create "${AMBER_IMAGE}")"
-          cleanup() { docker rm "${cid}" >/dev/null 2>&1 || true; }
-          trap cleanup EXIT
-          install -d "${RUNNER_TEMP}/bin"
-          docker cp "${cid}:/amber" "${RUNNER_TEMP}/bin/amber"
-          chmod +x "${RUNNER_TEMP}/bin/amber"
-          echo "${RUNNER_TEMP}/bin" >> "${GITHUB_PATH}"
-          "${RUNNER_TEMP}/bin/amber" --help >/dev/null
-
-      - name: Patch shard config into scenario
-        run: |
-          jq --argjson shard_index ${{ matrix.shard_index }} \
-             --argjson num_shards ${NUM_SHARDS} \
-             --arg gateway_manifest "${RELEASE_GATEWAY_MANIFEST}" \
-             --arg green_manifest "${RELEASE_GREEN_MANIFEST}" \
-             --arg purple_manifest "${RELEASE_PURPLE_MANIFEST}" \
-            '
-             .components.gateway.manifest = $gateway_manifest |
-             if .components.green then .components.green.manifest = $green_manifest
-             else .components.officeqa_pro_v2_green.manifest = $green_manifest end |
-             if .components.agent then .components.agent.manifest = $purple_manifest
-             else .components.opencode_agent.manifest = $purple_manifest end |
-             .components.gateway.config.assessment_config.shard_index = $shard_index |
-             .components.gateway.config.assessment_config.num_shards = $num_shards |
-             del(.components.gateway.config.assessment_config.num_instances)
-            ' \
-            "${{ needs.setup.outputs.scenario_path }}" > patched.json
-          mv patched.json "${{ needs.setup.outputs.scenario_path }}"
-
-      - name: Compile scenario
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -rf "${AMBER_COMPOSE_DIR}"
-          amber compile "${{ needs.setup.outputs.scenario_path }}" \
-            --output scenario-ir.json \
-            --docker-compose "${AMBER_COMPOSE_DIR}"
-          if ! jq -e '.exports[] | select(.name == "results" and .capability.kind == "http")' scenario-ir.json > /dev/null; then
-            echo "Scenario must export an HTTP capability named 'results'" >&2
-            exit 1
-          fi
-          if jq -e '.components[].program?.mounts[]? | select(.capability == "kvm")' scenario-ir.json > /dev/null; then
-            echo "Scenario uses framework.kvm; exporting AMBER_KVM_GID to Docker Compose"
-            echo "AMBER_KVM_GID=$(stat -c %g /dev/kvm)" >> "${GITHUB_ENV}"
-          else
-            echo "Scenario does not use framework.kvm"
-          fi
 
       - name: Run scenario — shard-${{ matrix.shard_index }}
         shell: bash
+        env:
+          SHARD_INDEX: ${{ matrix.shard_index }}
+          SOURCE_REF: refs/heads/main
+          SOURCE_SHA: ${{ needs.setup.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.setup.outputs.head_sha }}
+          BASE_SHA: ${{ needs.setup.outputs.base_sha }}
+          HEAD_REF: ${{ needs.setup.outputs.head_ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_ACTOR: ${{ github.actor }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REPOSITORY_URL: ${{ github.server_url }}/${{ github.repository }}
+          CALLER_WORKFLOW_REF: ${{ github.workflow_ref }}
+          CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          JOB_WORKFLOW_REF: onejumpinc/officeqa-pro-v2-agentbeats/.github/workflows/quick-submit-runner.yml@${{ inputs.trusted_runner_sha }}
+          JOB_WORKFLOW_SHA: ${{ inputs.trusted_runner_sha }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          SECRET_ENV_FILE: ${{ runner.temp }}/benchmark.env
         run: |
           set -euo pipefail
+          unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
+          if [[ ! -f "${SECRET_ENV_FILE}" || -L "${SECRET_ENV_FILE}" ||
+                "$(stat -c %a "${SECRET_ENV_FILE}")" != "600" ]]; then
+            echo "Benchmark secret env file is not an exact mode-0600 regular file" >&2
+            exit 1
+          fi
           compose=(docker compose -f "${AMBER_COMPOSE_DIR}/compose.yaml" -p "${AMBER_COMPOSE_PROJECT}")
+          compose_with_secrets=(docker compose --env-file "${SECRET_ENV_FILE}" \
+            -f "${AMBER_COMPOSE_DIR}/compose.yaml" -p "${AMBER_COMPOSE_PROJECT}")
+          compose_safe() {
+            env \
+              AMBER_CONFIG_GREEN_HF_TOKEN=redacted \
+              AMBER_CONFIG_AGENT_OFFICEQA_API_URL=https://redacted.invalid \
+              AMBER_CONFIG_AGENT_OFFICEQA_API_TOKEN=redacted \
+              "${compose[@]}" "$@"
+          }
           proxy_pid=""
           logs_pid=""
+          workflow_command_marker=""
           cleanup() {
             exit_code=$?
+            rm -f "${SECRET_ENV_FILE}"
             if [[ -n "${proxy_pid}" ]]; then
               kill "${proxy_pid}" >/dev/null 2>&1 || true
               wait "${proxy_pid}" >/dev/null 2>&1 || true
@@ -500,45 +910,61 @@ jobs:
               echo "Amber proxy log:" >&2
               [[ -f amber-proxy.log ]] && cat amber-proxy.log >&2 || true
               echo "Compose status:" >&2
-              "${compose[@]}" ps >&2 || true
+              compose_safe ps >&2 || true
+            fi
+            if [[ -n "${workflow_command_marker}" ]]; then
+              echo "::${workflow_command_marker}::"
             fi
             exit "${exit_code}"
           }
           trap cleanup EXIT
 
-          # Pull images before starting provenance.
-          "${compose[@]}" pull --quiet
-
-          # Generate provenance (image digests + manifest digests).
-          # All shards compile the same scenario and pull the same images,
-          # so provenance is identical; summary picks one.
-          image_digests=$(jq -r '.components[] | select(.program) | "\(.moniker)=\(.program.image)"' scenario-ir.json | while IFS='=' read -r name image; do
-            digest=$(docker image inspect "$image" --format '{{index .RepoDigests 0}}')
-            printf '%s\t%s\n' "$name" "$digest"
-          done | jq -Rn '[inputs | split("\t") | {(.[0]): .[1]}] | add // {}')
+          # Generate provenance from the pre-secret verified IR and Docker images.
+          image_digests=$(jq -c . runtime-images.json)
+          framework_image_digests=$(jq -c . framework-images.json)
           manifest_digests=$(jq '[.components[] | {(.moniker): .digest}] | add // {}' scenario-ir.json)
+          python3 .release-gate/tools/verify_exact_result.py ir \
+            --ir scenario-ir.json \
+            --scenario-kind generated \
+            --shard-index "${SHARD_INDEX}" \
+            --runtime-images runtime-images.json
           timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          source_sha=$(git rev-parse HEAD)
-          mkdir -p amber-compose/output
           jq -n \
             --argjson image_digests "$image_digests" \
+            --argjson framework_image_digests "$framework_image_digests" \
             --argjson manifest_digests "$manifest_digests" \
+            --argjson shard_index "${SHARD_INDEX}" \
             --arg timestamp "$timestamp" \
-            --arg run_url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            --arg ref "${{ github.ref }}" \
-            --arg sha "$source_sha" \
-            --arg repository_url "${{ github.server_url }}/${{ github.repository }}" \
-            --arg workflow_ref "${{ github.workflow_ref }}" \
-            --arg workflow_sha "${{ github.workflow_sha }}" \
+            --arg run_url "${RUN_URL}" \
+            --arg ref "${SOURCE_REF}" \
+            --arg sha "${SOURCE_SHA}" \
+            --arg repository_url "${REPOSITORY_URL}" \
+            --arg workflow_ref "${CALLER_WORKFLOW_REF}" \
+            --arg workflow_sha "${CALLER_WORKFLOW_SHA}" \
+            --arg job_workflow_ref "${JOB_WORKFLOW_REF}" \
+            --arg job_workflow_sha "${JOB_WORKFLOW_SHA}" \
+            --argjson run_attempt "${RUN_ATTEMPT}" \
+            --argjson pr_number "${PR_NUMBER}" \
+            --arg event_actor "${EVENT_ACTOR}" \
+            --arg pr_author "${PR_AUTHOR}" \
+            --arg head_ref "${HEAD_REF}" \
+            --arg head_sha "${HEAD_SHA}" \
+            --arg head_repository "${HEAD_REPOSITORY}" \
+            --arg base_ref "${BASE_REF}" \
+            --arg base_sha "${BASE_SHA}" \
             --arg gateway_manifest "${RELEASE_GATEWAY_MANIFEST}" \
-            --arg gateway_manifest_sha256 "${RELEASE_GATEWAY_MANIFEST_SHA256}" \
+            --arg gateway_manifest_sha256 "$(sha256sum release-manifests/gateway.json5 | cut -d' ' -f1)" \
             --arg green_manifest "${RELEASE_GREEN_MANIFEST}" \
-            --arg green_manifest_sha256 "${RELEASE_GREEN_MANIFEST_SHA256}" \
+            --arg green_manifest_sha256 "$(sha256sum release-manifests/green.json5 | cut -d' ' -f1)" \
             --arg purple_manifest "${RELEASE_PURPLE_MANIFEST}" \
-            --arg purple_manifest_sha256 "${RELEASE_PURPLE_MANIFEST_SHA256}" \
+            --arg purple_manifest_sha256 "$(sha256sum release-manifests/purple.json5 | cut -d' ' -f1)" \
+            --arg amber_image "${AMBER_IMAGE}" \
             '{
+              shard_index: $shard_index,
               image_digests: $image_digests,
+              framework_image_digests: $framework_image_digests,
               manifest_digests: $manifest_digests,
+              tool_images: {amber_cli: $amber_image},
               release_manifests: {
                 gateway: {url: $gateway_manifest, raw_sha256: $gateway_manifest_sha256},
                 green: {url: $green_manifest, raw_sha256: $green_manifest_sha256},
@@ -551,23 +977,76 @@ jobs:
                 sha: $sha,
                 repository_url: $repository_url,
                 workflow_ref: $workflow_ref,
-                workflow_sha: $workflow_sha
+                workflow_sha: $workflow_sha,
+                job_workflow_ref: $job_workflow_ref,
+                job_workflow_sha: $job_workflow_sha,
+                run_attempt: $run_attempt
+              },
+              pull_request: {
+                number: $pr_number,
+                event_name: "pull_request_target",
+                actor: $event_actor,
+                author: $pr_author,
+                head_ref: $head_ref,
+                head_sha: $head_sha,
+                head_repository: $head_repository,
+                base_ref: $base_ref,
+                base_sha: $base_sha
               }
-            }' > amber-compose/output/provenance.json
-          echo "Provenance:"
-          cat amber-compose/output/provenance.json
+            }' > "${RUNNER_TEMP}/provenance-template.json"
 
-          "${compose[@]}" up -d
-          "${compose[@]}" logs -f --no-color &
+          "${compose_with_secrets[@]}" up --pull never -d
+          rm -f "${SECRET_ENV_FILE}"
+
+          expected_service_count="$(jq -er '.services | length' rendered-compose.json)"
+          mapfile -t containers < <(
+            docker ps -aq \
+              --filter "label=com.docker.compose.project=${AMBER_COMPOSE_PROJECT}" |
+              sort
+          )
+          if [[ "${#containers[@]}" -ne "${expected_service_count}" ]]; then
+            echo "Running Compose project does not contain every exact release service" >&2
+            exit 1
+          fi
+          declare -A observed_services=()
+          for container in "${containers[@]}"; do
+            service="$(docker inspect --format \
+              '{{ index .Config.Labels "com.docker.compose.service" }}' "${container}")"
+            if [[ -z "${service}" || -n "${observed_services[${service}]+present}" ]]; then
+              echo "Running Compose project has a missing or duplicate service label" >&2
+              exit 1
+            fi
+            observed_services["${service}"]=1
+            expected_image="$(jq -er --arg service "${service}" \
+              '.services[$service].image' rendered-compose.json)"
+            configured_image="$(docker inspect --format '{{.Config.Image}}' "${container}")"
+            actual_image_id="$(docker inspect --format '{{.Image}}' "${container}")"
+            expected_image_id="$(docker image inspect --format '{{.Id}}' "${expected_image}")"
+            if [[ "${configured_image}" != "${expected_image}" ||
+                  "${actual_image_id}" != "${expected_image_id}" ]]; then
+              echo "Running container ${service} does not use its exact verified image" >&2
+              exit 1
+            fi
+          done
+
+          workflow_command_marker="$(cat /proc/sys/kernel/random/uuid)"
+          echo "::stop-commands::${workflow_command_marker}"
+          compose_safe logs -f --no-color &
           logs_pid=$!
 
-          amber proxy "${AMBER_COMPOSE_DIR}" \
+          env -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL \
+            amber proxy "${AMBER_COMPOSE_DIR}" \
             --project-name "${AMBER_COMPOSE_PROJECT}" \
             --export "results=127.0.0.1:${AMBER_PROXY_PORT}" > amber-proxy.log 2>&1 &
           proxy_pid=$!
 
           poll_url="http://127.0.0.1:${AMBER_PROXY_PORT}/"
           echo "Polling ${poll_url}..."
+          if [[ -e release-artifact ]]; then
+            echo "Release artifact staging path unexpectedly exists" >&2
+            exit 1
+          fi
+          install -d -m 700 release-artifact
           status=""
           deadline=$((SECONDS + (60 * RESULTS_TIMEOUT_MINUTES)))
           while (( SECONDS < deadline )); do
@@ -575,94 +1054,117 @@ jobs:
               echo "amber proxy exited unexpectedly" >&2
               exit 1
             fi
-            response="$(curl -fsS "${poll_url}" || true)"
+            response="$(curl -fsS --max-time 10 "${poll_url}" || true)"
             if [[ -z "${response}" ]]; then
               sleep 5
               continue
             fi
             status="$(jq -r '.status // empty' <<<"${response}")"
             if [[ -z "${status}" ]]; then
-              echo "Unexpected results payload:" >&2
-              echo "${response}" >&2
+              echo "Results endpoint returned an invalid status payload" >&2
               sleep 5
               continue
             fi
             if [[ "${status}" != "running" ]]; then
-              mkdir -p amber-compose/output
-              jq . <<<"${response}" > amber-compose/output/results.json
-              echo "Shard ${{ matrix.shard_index }} finished with status: ${status}"
+              jq . <<<"${response}" > release-artifact/.results.json.tmp
+              mv release-artifact/.results.json.tmp release-artifact/results.json
+              echo "Shard ${SHARD_INDEX} finished with status: ${status}"
               break
             fi
             sleep 5
           done
-          if [[ ! -f amber-compose/output/results.json ]]; then
+          if [[ ! -f release-artifact/results.json ]]; then
             echo "Timed out waiting ${RESULTS_TIMEOUT_MINUTES} minutes for shard results" >&2
             exit 1
           fi
           if [[ "${status}" != "completed" ]]; then
-            echo "Batch failed:" >&2
-            cat amber-compose/output/results.json >&2
+            echo "Batch did not complete successfully" >&2
             exit 1
           fi
+          results_sha256="$(sha256sum release-artifact/results.json | cut -d' ' -f1)"
+          jq --arg results_sha256 "${results_sha256}" \
+            '. + {results_sha256: $results_sha256}' \
+            "${RUNNER_TEMP}/provenance-template.json" \
+            > release-artifact/.provenance.json.tmp
+          mv release-artifact/.provenance.json.tmp release-artifact/provenance.json
+          rm -f "${RUNNER_TEMP}/provenance-template.json"
+          echo "Provenance:"
+          cat release-artifact/provenance.json
         timeout-minutes: 300
 
       - name: Stop scenario
         if: always()
-        run: docker compose -f amber-compose/compose.yaml -p "${AMBER_COMPOSE_PROJECT}" down -v --remove-orphans || true
+        env:
+          SECRET_ENV_FILE: ${{ runner.temp }}/benchmark.env
+        run: |
+          rm -f "${SECRET_ENV_FILE}"
+          env \
+            -u ACTIONS_ID_TOKEN_REQUEST_TOKEN \
+            -u ACTIONS_ID_TOKEN_REQUEST_URL \
+            AMBER_CONFIG_GREEN_HF_TOKEN=redacted \
+            AMBER_CONFIG_AGENT_OFFICEQA_API_URL=https://redacted.invalid \
+            AMBER_CONFIG_AGENT_OFFICEQA_API_TOKEN=redacted \
+            docker compose -f amber-compose/compose.yaml \
+              -p "${AMBER_COMPOSE_PROJECT}" down -v --remove-orphans || true
 
       - name: Upload shard results
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: shard-${{ matrix.shard_index }}
           path: |
-            amber-compose/output/results.json
-            amber-compose/output/provenance.json
+            release-artifact/results.json
+            release-artifact/provenance.json
 
   summary:
     needs: [setup, eval]
+    if: ${{ github.run_attempt == 1 && github.triggering_actor == 'agentbeats-dev[bot]' }}
     runs-on: ubuntu-latest
     permissions:
-      id-token: write
       contents: write
     defaults:
       run:
         shell: bash
     env:
-      AGENTBEATS_URL: ${{ vars.QUICK_SUBMIT_BACKEND_URL || 'https://agentbeats.dev' }}
-      OIDC_AUDIENCE: ${{ vars.QUICK_SUBMIT_OIDC_AUDIENCE || 'agentbeats-quick-submit-production' }}
       NUM_SHARDS: ${{ needs.setup.outputs.num_shards }}
-      SCENARIO_PATH: ${{ needs.setup.outputs.scenario_path }}
     steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-
-      - name: Checkout immutable release gate
-        uses: actions/checkout@v6
+      - name: Checkout trusted release tools
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           repository: onejumpinc/officeqa-pro-v2-agentbeats
-          ref: ${{ env.RELEASE_GATE_REF }}
+          ref: ${{ inputs.trusted_runner_sha }}
           path: .release-gate
           sparse-checkout: tools
           persist-credentials: false
 
+      - name: Materialize the exact submitted scenario blob
+        env:
+          REPOSITORY_URL: ${{ github.server_url }}/${{ github.repository }}.git
+          HEAD_SHA: ${{ needs.setup.outputs.head_sha }}
+          BASE_SHA: ${{ needs.setup.outputs.base_sha }}
+          SUBMISSION_ID: ${{ needs.setup.outputs.submission_id }}
+        run: |
+          set -euo pipefail
+          python3 .release-gate/tools/quick_submit_tree.py materialize \
+            --repo-dir "${RUNNER_TEMP}/submission.git" \
+            --repository-url "${REPOSITORY_URL}" \
+            --head-sha "${HEAD_SHA}" \
+            --base-sha "${BASE_SHA}" \
+            --submission-id "${SUBMISSION_ID}" \
+            --output "${RUNNER_TEMP}/scenario.release.json"
+
       - name: Download all shard artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: shard-artifacts
           pattern: shard-*
           merge-multiple: false
 
       - name: Aggregate results
+        env:
+          SCENARIO_PATH: ${{ runner.temp }}/scenario.release.json
         run: |
           set -euo pipefail
-          # Single-artifact downloads extract flat; normalize to subdirs
-          if [[ -f "shard-artifacts/results.json" && ! -d "shard-artifacts/shard-0" ]]; then
-            mkdir -p shard-artifacts/shard-0
-            mv shard-artifacts/results.json shard-artifacts/shard-0/
-            mv shard-artifacts/provenance.json shard-artifacts/shard-0/ 2>/dev/null || true
-          fi
           # Build expected file paths from shard count
           shard_results=()
           for i in $(seq 0 $(( ${NUM_SHARDS} - 1 ))); do
@@ -670,6 +1172,23 @@ jobs:
             if [[ ! -f "$f" ]]; then
               echo "ERROR: missing results for shard ${i}" >&2
               ls -R shard-artifacts/ >&2 || true
+              exit 1
+            fi
+            provenance_file="shard-artifacts/shard-${i}/provenance.json"
+            expected_result_sha256="$(jq -er \
+              '.results_sha256 | select(type == "string" and test("^[0-9a-f]{64}$"))' \
+              "${provenance_file}")"
+            actual_result_sha256="$(sha256sum "$f" | cut -d' ' -f1)"
+            if [[ "${actual_result_sha256}" != "${expected_result_sha256}" ]]; then
+              echo "ERROR: result hash does not match provenance for shard ${i}" >&2
+              exit 1
+            fi
+            if ! jq -e --argjson expected "${i}" '
+              .status == "completed" and
+              (.results | type == "array" and length == 1) and
+              .results[0].shard_index == $expected
+            ' "$f" >/dev/null; then
+              echo "ERROR: result artifact does not match shard ${i}" >&2
               exit 1
             fi
             shard_results+=("$f")
@@ -698,42 +1217,56 @@ jobs:
             fi
             shard_provenance+=("$f")
           done
-          # image_digests and github_actions must be identical across shards
-          expected_image_digests=$(jq '.image_digests' "${shard_provenance[0]}")
-          expected_release_manifests=$(jq '.release_manifests' "${shard_provenance[0]}")
-          expected_github_actions=$(jq '.github_actions' "${shard_provenance[0]}")
-          timestamps='[]'
-          manifest_digests='[]'
-          for f in "${shard_provenance[@]}"; do
-            got=$(jq '.image_digests' "$f")
-            if [[ "$got" != "$expected_image_digests" ]]; then
-              echo "ERROR: image_digests mismatch in $f" >&2; exit 1
+          expected_image_digests=$(jq -cS '.image_digests' "${shard_provenance[0]}")
+          expected_framework_image_digests=$(jq -cS '.framework_image_digests' "${shard_provenance[0]}")
+          expected_release_manifests=$(jq -cS '.release_manifests' "${shard_provenance[0]}")
+          expected_tool_images=$(jq -cS '.tool_images' "${shard_provenance[0]}")
+          expected_github_actions=$(jq -cS '.github_actions' "${shard_provenance[0]}")
+          expected_pull_request=$(jq -cS '.pull_request' "${shard_provenance[0]}")
+          first_timestamp=$(jq -er '.timestamp' "${shard_provenance[0]}")
+          manifest_digests_by_shard='{}'
+          for i in $(seq 0 $(( NUM_SHARDS - 1 ))); do
+            f="${shard_provenance[$i]}"
+            if ! jq -e --argjson expected "$i" '.shard_index == $expected' "$f" >/dev/null; then
+              echo "ERROR: provenance shard index mismatch in $f" >&2; exit 1
             fi
-            got=$(jq '.release_manifests' "$f")
-            if [[ "$got" != "$expected_release_manifests" ]]; then
-              echo "ERROR: release_manifests mismatch in $f" >&2; exit 1
-            fi
-            got=$(jq '.github_actions' "$f")
-            if [[ "$got" != "$expected_github_actions" ]]; then
-              echo "ERROR: github_actions mismatch in $f" >&2; exit 1
-            fi
-            timestamps=$(echo "$timestamps" | jq --argjson ts "$(jq '.timestamp' "$f")" '. + [$ts]')
-            manifest_digests=$(echo "$manifest_digests" | jq --argjson md "$(jq '.manifest_digests' "$f")" '. + [$md]')
+            for field in image_digests framework_image_digests release_manifests tool_images github_actions pull_request; do
+              expected_variable="expected_${field}"
+              got=$(jq -cS ".${field}" "$f")
+              if [[ "$got" != "${!expected_variable}" ]]; then
+                echo "ERROR: ${field} mismatch in $f" >&2; exit 1
+              fi
+            done
+            shard_manifests=$(jq -c '.manifest_digests' "$f")
+            manifest_digests_by_shard=$(jq -c \
+              --arg key "$i" \
+              --argjson value "$shard_manifests" \
+              '. + {($key): $value}' <<<"$manifest_digests_by_shard")
           done
-          # Output the flat shape the backend expects (manifest_digests + timestamp),
-          # using the first shard's values (all shards are identical).
+          shard_zero_manifests=$(jq -c '."0"' <<<"$manifest_digests_by_shard")
+          aggregate_results_sha256="$(sha256sum results.json | cut -d' ' -f1)"
           jq -n \
             --argjson image_digests "$expected_image_digests" \
-            --argjson manifest_digests "$(echo "$manifest_digests" | jq '.[0]')" \
+            --argjson framework_image_digests "$expected_framework_image_digests" \
+            --argjson manifest_digests "$shard_zero_manifests" \
+            --argjson manifest_digests_by_shard "$manifest_digests_by_shard" \
             --argjson release_manifests "$expected_release_manifests" \
-            --arg timestamp "$(echo "$timestamps" | jq -r '.[0]')" \
+            --argjson tool_images "$expected_tool_images" \
+            --arg timestamp "$first_timestamp" \
             --argjson github_actions "$expected_github_actions" \
+            --argjson pull_request "$expected_pull_request" \
+            --arg results_sha256 "$aggregate_results_sha256" \
             '{
               image_digests: $image_digests,
+              framework_image_digests: $framework_image_digests,
               manifest_digests: $manifest_digests,
+              manifest_digests_by_shard: $manifest_digests_by_shard,
               release_manifests: $release_manifests,
+              tool_images: $tool_images,
+              results_sha256: $results_sha256,
               timestamp: $timestamp,
-              github_actions: $github_actions
+              github_actions: $github_actions,
+              pull_request: $pull_request
             }' > provenance.json
           echo "Provenance:"
           cat provenance.json
@@ -743,70 +1276,202 @@ jobs:
           GREEN_SECRETS_JSON: ${{ secrets.GREEN_SECRETS_JSON }}
         run: |
           set -euo pipefail
-          hf_token="$(jq -er '.hf_token | select(type == "string" and length > 0)' \
-            <<<"${GREEN_SECRETS_JSON}")"
-          echo "::add-mask::${hf_token}"
+          token_file="${RUNNER_TEMP}/hf-token"
+          trap 'rm -f "${token_file}"' EXIT
+          TOKEN_FILE="${token_file}" node - <<'NODE'
+          const fs = require('fs');
+          const raw = process.env.GREEN_SECRETS_JSON?.trim();
+          if (!raw) throw new Error('GREEN_SECRETS_JSON is required');
+          let parsed;
+          try {
+            parsed = JSON.parse(raw);
+          } catch {
+            throw new Error('GREEN_SECRETS_JSON must be valid JSON');
+          }
+          if (
+            !parsed || typeof parsed !== 'object' || Array.isArray(parsed) ||
+            JSON.stringify(Object.keys(parsed).sort()) !== JSON.stringify(['hf_token'])
+          ) {
+            throw new Error('GREEN_SECRETS_JSON must contain only hf_token');
+          }
+          const value = parsed.hf_token;
+          if (
+            typeof value !== 'string' || value.length === 0 || value.trim() !== value ||
+            /[\r\n\0']/.test(value)
+          ) {
+            throw new Error('GREEN_SECRETS_JSON hf_token is not an exact single-line string');
+          }
+          const escaped = value.replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A');
+          console.log(`::add-mask::${escaped}`);
+          const fd = fs.openSync(process.env.TOKEN_FILE, 'wx', 0o600);
+          try {
+            fs.writeFileSync(fd, value, {encoding: 'utf8'});
+          } finally {
+            fs.closeSync(fd);
+          }
+          NODE
+          hf_token="$(<"${token_file}")"
           HF_TOKEN="${hf_token}" python3 .release-gate/tools/fetch_pinned_dataset.py \
             "${RUNNER_TEMP}/officeqa_pro_v2.csv"
 
       - name: Verify exact 90/90 release
+        env:
+          SCENARIO_PATH: ${{ runner.temp }}/scenario.release.json
+          SOURCE_SHA: ${{ needs.setup.outputs.head_sha }}
+          BASE_SHA: ${{ needs.setup.outputs.base_sha }}
+          SUBMISSION_ID: ${{ needs.setup.outputs.submission_id }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_ACTOR: ${{ github.actor }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REPOSITORY_URL: ${{ github.server_url }}/${{ github.repository }}
+          CALLER_WORKFLOW_REF: ${{ github.workflow_ref }}
+          CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          JOB_WORKFLOW_REF: onejumpinc/officeqa-pro-v2-agentbeats/.github/workflows/quick-submit-runner.yml@${{ inputs.trusted_runner_sha }}
+          JOB_WORKFLOW_SHA: ${{ inputs.trusted_runner_sha }}
         run: |
           set -euo pipefail
-          source_sha=$(git rev-parse HEAD)
           python3 .release-gate/tools/verify_exact_result.py result \
             --artifact results.json \
             --dataset "${RUNNER_TEMP}/officeqa_pro_v2.csv" \
             --provenance provenance.json \
             --scenario "${SCENARIO_PATH}" \
-            --expected-run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
-            --expected-repository-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
-            --expected-github-sha "$source_sha"
+            --require-kind generated \
+            --expected-run-url "${RUN_URL}" \
+            --expected-repository-url "${REPOSITORY_URL}" \
+            --expected-github-sha "${BASE_SHA}" \
+            --expected-github-ref refs/heads/main \
+            --expected-workflow-ref "${CALLER_WORKFLOW_REF}" \
+            --expected-workflow-sha "${CALLER_WORKFLOW_SHA}" \
+            --expected-job-workflow-ref "${JOB_WORKFLOW_REF}" \
+            --expected-job-workflow-sha "${JOB_WORKFLOW_SHA}" \
+            --expected-submission-id "${SUBMISSION_ID}" \
+            --expected-pr-number "${PR_NUMBER}" \
+            --expected-actor "${EVENT_ACTOR}" \
+            --expected-head-repository "${HEAD_REPOSITORY}" \
+            --expected-base-sha "${BASE_SHA}" \
+            --expected-head-sha "${SOURCE_SHA}"
 
-      - name: Commit results
+      - name: Create verified result commit without a worktree
+        id: result-commit
         env:
-          BASE: ${{ needs.setup.outputs.scenario_base }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          mkdir -p results
-          mv results.json "results/${BASE}.json"
-          mv provenance.json "submissions/${BASE}-provenance.json"
-          git add "results/${BASE}.json" "submissions/${BASE}-provenance.json"
-          git commit -m "[AgentBeats] Scenario results"
-          git push origin "HEAD:refs/heads/${GITHUB_HEAD_REF}"
-
-      # Cleanup: delete secrets from backend.
-      # Skipped when no backend is configured.
-      - name: Fetch GitHub OIDC token
-        if: success()
-        id: oidc
-        shell: bash
+          HEAD_SHA: ${{ needs.setup.outputs.head_sha }}
+          SUBMISSION_ID: ${{ needs.setup.outputs.submission_id }}
         run: |
           set -euo pipefail
-          oidc_response="$(curl -fsS \
-            -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${OIDC_AUDIENCE}")"
-          oidc_token="$(jq -r '.value' <<<"$oidc_response")"
-          if [[ -z "$oidc_token" || "$oidc_token" == "null" ]]; then
-            echo "Failed to fetch OIDC token" >&2; exit 1
-          fi
-          echo "::add-mask::$oidc_token"
-          echo "token=$oidc_token" >> "$GITHUB_OUTPUT"
+          result_commit=$(python3 .release-gate/tools/quick_submit_tree.py commit \
+            --repo-dir "${RUNNER_TEMP}/submission.git" \
+            --head-sha "${HEAD_SHA}" \
+            --submission-id "${SUBMISSION_ID}" \
+            --result results.json \
+            --provenance provenance.json)
+          printf 'sha=%s\n' "${result_commit}" >> "${GITHUB_OUTPUT}"
 
-      - name: Delete secrets from backend
-        if: success()
+      - name: Compare-and-swap verified result commit onto submission branch
+        env:
+          REPOSITORY_URL: ${{ github.server_url }}/${{ github.repository }}.git
+          HEAD_SHA: ${{ needs.setup.outputs.head_sha }}
+          SUBMISSION_ID: ${{ needs.setup.outputs.submission_id }}
+          RESULT_COMMIT: ${{ steps.result-commit.outputs.sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 .release-gate/tools/quick_submit_tree.py push \
+            --repo-dir "${RUNNER_TEMP}/submission.git" \
+            --repository-url "${REPOSITORY_URL}" \
+            --head-sha "${HEAD_SHA}" \
+            --submission-id "${SUBMISSION_ID}" \
+            --commit-sha "${RESULT_COMMIT}"
+
+  cleanup:
+    needs: [setup, eval, summary]
+    if: >-
+      ${{ always() && github.run_attempt == 1 &&
+          github.triggering_actor == 'agentbeats-dev[bot]' &&
+          needs.setup.outputs.submission_id != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Delete secrets from backend regardless of benchmark outcome
         shell: bash
         env:
           BACKEND_URL: ${{ env.AGENTBEATS_URL }}
           SUBMISSION_ID: ${{ needs.setup.outputs.submission_id }}
-          OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
+          EXPECTED_ACTOR: agentbeats-dev[bot]
+          EXPECTED_HEAD_REF: ${{ needs.setup.outputs.head_ref }}
+          EXPECTED_BASE_SHA: ${{ needs.setup.outputs.base_sha }}
+          EXPECTED_RUNNER_SHA: ${{ inputs.trusted_runner_sha }}
+          EXPECTED_REPOSITORY_ID: ${{ github.repository_id }}
+          EXPECTED_RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
-          http_code="$(curl -sS -o /dev/null -w "%{http_code}" -X POST \
-            -H "Authorization: Bearer ${OIDC_TOKEN}" \
-            "${BACKEND_URL}/api/quick-submit/${SUBMISSION_ID}/complete" || true)"
-          if [[ "$http_code" == "200" ]]; then
+          if [[ "${BACKEND_URL}" != "https://agentbeats.dev" ||
+                "${OIDC_AUDIENCE}" != "agentbeats-quick-submit-production" ]]; then
+            echo "Quick Submit identity endpoints are not the frozen production values" >&2
+            exit 1
+          fi
+          encoded_audience="$(jq -rn --arg value "${OIDC_AUDIENCE}" '$value | @uri')"
+          oidc_response="$(
+            printf 'Authorization: Bearer %s\n' "${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" |
+              curl -fsS --proto '=https' --tlsv1.2 --max-time 60 -H @- \
+                "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${encoded_audience}"
+          )"
+          oidc_token="$(jq -er '.value | select(type == "string" and length > 0)' \
+            <<<"${oidc_response}")"
+          echo "::add-mask::${oidc_token}"
+          OIDC_TOKEN="${oidc_token}" node - <<'NODE'
+          const token = process.env.OIDC_TOKEN;
+          const parts = token.split('.');
+          if (parts.length !== 3) throw new Error('GitHub OIDC token is not a JWT');
+          let claims;
+          try {
+            claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+          } catch {
+            throw new Error('GitHub OIDC token has invalid claims JSON');
+          }
+          const expectedRunnerRef =
+            `${process.env.GITHUB_REPOSITORY}/.github/workflows/` +
+            `quick-submit-runner.yml@${process.env.EXPECTED_RUNNER_SHA}`;
+          const expectedWorkflowRef =
+            `${process.env.GITHUB_REPOSITORY}/.github/workflows/` +
+            'quick-submit.yml@refs/heads/main';
+          const expected = {
+            aud: process.env.OIDC_AUDIENCE,
+            repository: process.env.GITHUB_REPOSITORY,
+            repository_id: process.env.EXPECTED_REPOSITORY_ID,
+            event_name: 'pull_request_target',
+            actor: process.env.EXPECTED_ACTOR,
+            head_ref: process.env.EXPECTED_HEAD_REF,
+            base_ref: 'main',
+            ref: 'refs/heads/main',
+            sha: process.env.EXPECTED_BASE_SHA,
+            workflow_ref: expectedWorkflowRef,
+            workflow_sha: process.env.EXPECTED_BASE_SHA,
+            job_workflow_ref: expectedRunnerRef,
+            job_workflow_sha: process.env.EXPECTED_RUNNER_SHA,
+            run_id: process.env.EXPECTED_RUN_ID,
+            run_attempt: '1',
+            runner_environment: 'github-hosted',
+          };
+          for (const [key, value] of Object.entries(expected)) {
+            if (claims[key] !== value) {
+              throw new Error(`GitHub OIDC claim ${key} does not match the release gate`);
+            }
+          }
+          NODE
+
+          complete_url="${BACKEND_URL}/api/quick-submit/${SUBMISSION_ID}/complete"
+          http_code="$(
+            printf 'Authorization: Bearer %s\n' "${oidc_token}" |
+              curl -sS --proto '=https' --tlsv1.2 --max-time 60 \
+                -o /dev/null -w "%{http_code}" -X POST \
+                -H @- "${complete_url}" || true
+          )"
+          if [[ "${http_code}" == "200" ]]; then
             echo "Secrets deleted successfully"
           else
-            echo "Warning: secrets cleanup returned HTTP ${http_code} (non-fatal)" >&2
+            echo "Secrets cleanup returned HTTP ${http_code}" >&2
+            exit 1
           fi

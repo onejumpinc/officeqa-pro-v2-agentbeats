@@ -24,17 +24,15 @@ class GateError(ValueError):
 
 
 def _validate_uuid(value: str) -> str:
-    normalized = value.lower()
-    if not UUID_RE.fullmatch(normalized):
+    if not UUID_RE.fullmatch(value):
         raise GateError(f"invalid Quick Submit UUID: {value!r}")
-    return normalized
+    return value
 
 
 def _validate_sha(value: str, label: str) -> str:
-    normalized = value.lower()
-    if not SHA_RE.fullmatch(normalized):
+    if not SHA_RE.fullmatch(value):
         raise GateError(f"{label} must be a full lowercase Git SHA")
-    return normalized
+    return value
 
 
 def _validate_repository_url(value: str) -> str:
@@ -151,6 +149,8 @@ def materialize_submission(
     _initialize_bare_repository(repo_dir)
     _fetch_event_commits(repo_dir, repository_url, head_sha, base_sha)
     merge_base = _git_text(repo_dir, "merge-base", base_sha, head_sha)
+    if merge_base != base_sha:
+        raise GateError("submission head must be based on the exact pull request base")
     raw_diff = _git(
         repo_dir,
         "diff",
@@ -167,7 +167,15 @@ def materialize_submission(
             f"Quick Submit PR adds {changed_path!r}, expected {expected_path!r}"
         )
 
-    tree_record = _git(repo_dir, "ls-tree", "-z", head_sha, "--", expected_path).stdout
+    tree_record = _git(
+        repo_dir,
+        "--literal-pathspecs",
+        "ls-tree",
+        "-z",
+        head_sha,
+        "--",
+        expected_path,
+    ).stdout
     records = [record for record in tree_record.split(b"\0") if record]
     if len(records) != 1 or b"\t" not in records[0]:
         raise GateError("scenario path does not resolve to exactly one Git tree entry")
@@ -182,11 +190,17 @@ def materialize_submission(
     if oid != changed_oid:
         raise GateError("scenario tree object disagrees with the validated PR diff")
 
-    scenario = _git(repo_dir, "cat-file", "blob", oid).stdout
-    if not scenario or len(scenario) > MAX_SCENARIO_BYTES:
+    try:
+        scenario_size = int(_git_text(repo_dir, "cat-file", "-s", oid))
+    except ValueError as error:
+        raise GateError("scenario blob size is malformed") from error
+    if not 1 <= scenario_size <= MAX_SCENARIO_BYTES:
         raise GateError(
             f"scenario size must be between 1 and {MAX_SCENARIO_BYTES} bytes"
         )
+    scenario = _git(repo_dir, "cat-file", "blob", oid).stdout
+    if len(scenario) != scenario_size:
+        raise GateError("scenario blob size changed while materializing")
     output.parent.mkdir(parents=True, exist_ok=True)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
@@ -286,7 +300,7 @@ def push_results_commit(
     commit_sha: str,
     token: str,
 ) -> None:
-    """Push the verified child commit without force or stored credentials."""
+    """Push the verified child commit with an exact lease and no stored credential."""
     repository_url = _validate_repository_url(repository_url)
     head_sha = _validate_sha(head_sha, "head SHA")
     commit_sha = _validate_sha(commit_sha, "result commit SHA")
@@ -310,6 +324,7 @@ def push_results_commit(
     _git(
         repo_dir,
         "push",
+        f"--force-with-lease=refs/heads/{branch}:{head_sha}",
         repository_url,
         f"{commit_sha}:refs/heads/{branch}",
         env=push_env,
@@ -377,7 +392,7 @@ def main() -> int:
                 commit_sha=args.commit_sha,
                 token=os.environ.get(args.token_env, ""),
             )
-            print("PASS: exact result commit pushed without force")
+            print("PASS: exact result commit pushed with a compare-and-swap lease")
     except (GateError, OSError) as error:
         print(f"FAIL: {error}", file=sys.stderr)
         return 1
