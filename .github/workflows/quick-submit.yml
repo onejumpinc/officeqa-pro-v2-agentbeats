@@ -1,20 +1,27 @@
 name: Quick Submit
 
 on:
-  pull_request:
-    types: [opened, reopened]
+  pull_request_target:
+    types: [opened]
     branches: [main]
 
 jobs:
   run-scenario:
-    if: startsWith(github.head_ref, 'quick-submit-')
-    uses: onejumpinc/officeqa-pro-v2-agentbeats/.github/workflows/quick-submit-runner.yml@cc81672a303f0827aff1408eb31257f81e64f206
+    if: >-
+      ${{ github.run_attempt == 1 &&
+          github.actor == 'agentbeats-dev[bot]' &&
+          github.triggering_actor == 'agentbeats-dev[bot]' &&
+          github.event.pull_request.user.login == 'agentbeats-dev[bot]' &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          startsWith(github.event.pull_request.head.ref, 'quick-submit-') }}
+    uses: onejumpinc/officeqa-pro-v2-agentbeats/.github/workflows/quick-submit-runner.yml@88431878691255f904990142f754f45041161e06
     permissions:
       id-token: write
       contents: write
       packages: read
     with:
       num_shards: 10
+      trusted_runner_sha: 88431878691255f904990142f754f45041161e06
     secrets:
       GREEN_SECRETS_JSON: >-
         {"hf_token":${{ toJSON(secrets.OFFICEQA_PRO_V2_HF_TOKEN) }}}

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
+import re
+import subprocess
 from email.message import Message
 from pathlib import Path
 from urllib.request import Request
@@ -38,6 +41,11 @@ from tools.verify_exact_result import (
 
 ROOT = Path(__file__).resolve().parents[1]
 TEST_GREEN_AGENT_ID = "11111111-1111-4111-8111-111111111111"
+CHECKED_IN_GREEN_AGENT_ID = gate.GREEN_AGENT_ID
+FROZEN_RUNNER_SHA = "88431878691255f904990142f754f45041161e06"
+FROZEN_RUNNER_SHA256 = (
+    "b90d6f2a564730dacd2cd6ba7a3a8ea5233ad37ee75c5546e5bdfeba836c9181"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -62,6 +70,26 @@ def _dataset(tmp_path: Path) -> tuple[Path, list[dict[str, str]]]:
         writer.writeheader()
         writer.writerows(rows)
     return path, rows
+
+
+def _frozen_runner() -> str:
+    working_runner = (ROOT / ".github/workflows/quick-submit-runner.yml").read_text()
+    assert hashlib.sha256(working_runner.encode()).hexdigest() == FROZEN_RUNNER_SHA256
+    completed = subprocess.run(
+        [
+            "git",
+            "show",
+            f"{FROZEN_RUNNER_SHA}:.github/workflows/quick-submit-runner.yml",
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        return working_runner
+    assert completed.stdout == working_runner
+    return completed.stdout
 
 
 def _scenario() -> dict:
@@ -492,6 +520,25 @@ def test_scenario_rejects_placeholder_green_id() -> None:
         verify_scenario(scenario)
 
 
+def test_checked_in_scenario_is_strict_json_and_fails_closed_until_registration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = json.loads((ROOT / "scenario.json5").read_text())
+    registered = scenario["metadata"]["agentbeats_ids"]["officeqa_pro_v2_green"]
+    assert registered == CHECKED_IN_GREEN_AGENT_ID
+
+    monkeypatch.setattr(gate, "GREEN_AGENT_ID", CHECKED_IN_GREEN_AGENT_ID)
+    if CHECKED_IN_GREEN_AGENT_ID == "REPLACE_WITH_GREEN_AGENT_ID":
+        with pytest.raises(ValueError, match="registration placeholder"):
+            verify_scenario(scenario, require_kind="self-run")
+    else:
+        assert re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+            CHECKED_IN_GREEN_AGENT_ID,
+        )
+        verify_scenario(scenario, require_kind="self-run")
+
+
 def test_scenario_rejects_unpinned_green_id() -> None:
     scenario = _scenario()
     scenario["metadata"]["agentbeats_ids"]["officeqa_pro_v2_green"] = (
@@ -640,7 +687,7 @@ def test_dataset_redirect_does_not_forward_token_cross_host() -> None:
 
 def test_public_workflows_gate_before_any_result_write() -> None:
     self_run = (ROOT / ".github/workflows/run-scenario.yml").read_text()
-    quick_run = (ROOT / ".github/workflows/quick-submit-runner.yml").read_text()
+    quick_run = _frozen_runner()
     assert self_run.index("Verify exact 90/90 release") < self_run.index(
         "Create submission branch and commit results"
     )
@@ -677,12 +724,87 @@ def test_public_workflows_gate_before_any_result_write() -> None:
     assert ".release-gate/tools/fetch_pinned_dataset.py" in quick_run
 
 
+def test_working_runner_matches_the_immutable_caller_pin() -> None:
+    working_runner = (ROOT / ".github/workflows/quick-submit-runner.yml").read_text()
+    assert working_runner == _frozen_runner()
+
+
 def test_quick_submit_calls_repository_owned_runner() -> None:
     workflow = (ROOT / ".github/workflows/quick-submit.yml").read_text()
+    trigger = workflow.split("jobs:", maxsplit=1)[0]
+    assert "\n  pull_request_target:\n" in trigger
+    assert "\n  pull_request:\n" not in trigger
+    assert "\n  push:\n" not in trigger
+    assert "\n  workflow_dispatch:\n" not in trigger
+    assert "types: [opened]" in workflow
+    assert "branches: [main]" in workflow
+    assert "github.run_attempt == 1" in workflow
+    assert "github.actor == 'agentbeats-dev[bot]'" in workflow
+    assert "github.triggering_actor == 'agentbeats-dev[bot]'" in workflow
+    assert "github.event.pull_request.user.login == 'agentbeats-dev[bot]'" in workflow
     assert (
-        "uses: onejumpinc/officeqa-pro-v2-agentbeats/"
-        ".github/workflows/quick-submit-runner.yml@"
-        "cc81672a303f0827aff1408eb31257f81e64f206"
-    ) in workflow
+        "github.event.pull_request.head.repo.full_name == github.repository" in workflow
+    )
+    assert "startsWith(github.event.pull_request.head.ref, 'quick-submit-')" in workflow
+    runner_match = re.search(
+        r"uses: onejumpinc/officeqa-pro-v2-agentbeats/"
+        r"\.github/workflows/quick-submit-runner\.yml@([0-9a-f]{40})",
+        workflow,
+    )
+    input_match = re.search(r"trusted_runner_sha: ([0-9a-f]{40})", workflow)
+    assert runner_match is not None
+    assert input_match is not None
+    assert runner_match.group(1) == input_match.group(1) == FROZEN_RUNNER_SHA
+    assert (
+        "permissions:\n      id-token: write\n      contents: write\n      packages: read"
+        in workflow
+    )
+    assert workflow.count("secrets.") == 1
+    assert "toJSON(secrets.OFFICEQA_PRO_V2_HF_TOKEN)" in workflow
     assert "uses: ./.github/workflows/quick-submit-runner.yml" not in workflow
     assert "RDI-Foundation/agentbeats-leaderboard-template" not in workflow
+
+
+def test_manual_workflow_is_main_only_environment_gated_and_pinned() -> None:
+    workflow = (ROOT / ".github/workflows/run-scenario.yml").read_text()
+    trigger = workflow.split("jobs:", maxsplit=1)[0]
+    assert "\n  workflow_dispatch:\n" in trigger
+    assert "\n  pull_request:\n" not in trigger
+    assert "\n  pull_request_target:\n" not in trigger
+    assert "\n  push:\n" not in trigger
+    assert workflow.count("environment: officeqa-production") == 2
+    setup_job, remaining_jobs = workflow.split("\n  eval:\n", maxsplit=1)
+    eval_job, summary_job = remaining_jobs.split("\n  summary:\n", maxsplit=1)
+    assert "environment: officeqa-production" not in setup_job
+    assert "environment: officeqa-production" in eval_job
+    assert "environment: officeqa-production" in summary_job
+    assert workflow.count("secrets.GREEN_HF_TOKEN") == 2
+    assert workflow.count("secrets.PARTICIPANT_API_URL") == 1
+    assert workflow.count("secrets.PARTICIPANT_API_TOKEN") == 1
+    assert "id-token: write" not in workflow
+    assert "EVENT_REF: ${{ github.ref }}" in workflow
+    assert (
+        workflow.count(
+            "if: ${{ github.run_attempt == 1 && github.actor == github.triggering_actor }}"
+        )
+        == 3
+    )
+    assert "expected_repository='onejumpinc/officeqa-pro-v2-agentbeats'" in workflow
+    assert (
+        'expected_workflow_ref="${GITHUB_REPOSITORY}/.github/workflows/'
+        'run-scenario.yml@refs/heads/main"' in workflow
+    )
+    assert '"${EVENT_REF}" != "refs/heads/main"' in workflow
+    assert '"${WORKFLOW_SHA}" != "${EVENT_SHA}"' in workflow
+    assert workflow.count("--require-kind self-run") == 4
+    assert workflow.count("persist-credentials: false") == 3
+    assert all("${{" not in block for block in _workflow_run_blocks(workflow))
+
+    uses = re.findall(r"^\s+uses:\s+(\S+)", workflow, flags=re.MULTILINE)
+    assert uses
+    assert all(re.fullmatch(r"[^@\s]+@[0-9a-f]{40}", value) for value in uses)
+    assert workflow.index("Verify exact 90/90 release") < workflow.index(
+        "Create submission branch and commit results"
+    )
+    assert '--force-with-lease="refs/heads/${BRANCH_NAME}:"' in workflow
+    assert 'echo "::add-mask::${basic_auth}"' in workflow
