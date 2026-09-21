@@ -264,6 +264,18 @@ def test_scenario_rejects_float_shard_count() -> None:
         verify_scenario(scenario)
 
 
+def test_scenario_rejects_overlay_or_binding_extension() -> None:
+    scenario = _scenario()
+    scenario["overlays"] = []
+    with pytest.raises(ValueError, match="top-level"):
+        verify_scenario(scenario)
+
+    scenario = _scenario()
+    scenario["bindings"][0]["when"] = "config.enabled"
+    with pytest.raises(ValueError, match="binding fields"):
+        verify_scenario(scenario)
+
+
 def test_scenario_rejects_placeholder_green_id() -> None:
     scenario = _scenario()
     scenario["metadata"]["agentbeats_ids"]["officeqa_pro_v2_green"] = (
@@ -288,6 +300,15 @@ def test_result_rejects_wrong_participant(tmp_path: Path) -> None:
     artifact = _artifact(rows)
     artifact["participants"]["agent"] = "wrong"
     with pytest.raises(ValueError, match="participants.agent"):
+        verify_artifact(artifact, rows)
+
+
+def test_result_rejects_nested_or_extra_shard_shape(tmp_path: Path) -> None:
+    dataset_path, _ = _dataset(tmp_path)
+    rows = load_dataset(dataset_path, None, None)
+    artifact = _artifact(rows)
+    artifact["results"] = [{"wrapper": shard} for shard in artifact["results"]]
+    with pytest.raises(ValueError, match="shard result fields"):
         verify_artifact(artifact, rows)
 
 

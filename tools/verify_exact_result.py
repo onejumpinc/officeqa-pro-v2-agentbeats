@@ -156,6 +156,15 @@ def load_dataset(
 def _verify_assessment(
     assessment: dict[str, Any], *, require_shard_index: bool
 ) -> None:
+    if "num_instances" in assessment:
+        raise ValueError("num_instances is forbidden for a scored public run")
+    base_keys = {"tolerance", "timeout_seconds", "num_shards"}
+    allowed_keys = base_keys | {"shard_index"}
+    if require_shard_index and set(assessment) != allowed_keys:
+        raise ValueError("self-run assessment_config keys are not exact")
+    if not require_shard_index and set(assessment) not in (base_keys, allowed_keys):
+        raise ValueError("generated assessment_config keys are not exact")
+
     num_shards = assessment.get("num_shards")
     if (
         isinstance(num_shards, bool)
@@ -180,8 +189,6 @@ def _verify_assessment(
         )
     ):
         raise ValueError("generated scenario shard_index must be absent or 0")
-    if "num_instances" in assessment:
-        raise ValueError("num_instances is forbidden for a scored public run")
     if _as_number(assessment.get("tolerance"), "tolerance") != 0.0:
         raise ValueError("tolerance must be exactly 0")
     if _as_number(assessment.get("timeout_seconds"), "timeout_seconds") != 900.0:
@@ -195,6 +202,11 @@ def _binding_set(scenario: dict[str, Any]) -> set[tuple[str, str, bool]]:
     actual_bindings: set[tuple[str, str, bool]] = set()
     for binding in bindings:
         item = _mapping(binding, "scenario binding")
+        expected_keys = (
+            {"to", "from", "weak"} if item.get("weak") is True else {"to", "from"}
+        )
+        if set(item) != expected_keys:
+            raise ValueError("scenario binding fields are not exact")
         actual_bindings.add(
             (str(item.get("to")), str(item.get("from")), item.get("weak") is True)
         )
@@ -207,6 +219,11 @@ def _verify_registered_id(value: Any, label: str) -> str:
     if not isinstance(value, str) or not UUID_RE.fullmatch(value):
         raise ValueError(f"{label} is missing or still a placeholder")
     return value
+
+
+def _verify_component_shape(component: dict[str, Any], label: str) -> None:
+    if set(component) != {"manifest", "config"}:
+        raise ValueError(f"{label} fields are not exact")
 
 
 def _verify_secret_schema(scenario: dict[str, Any], expected_keys: set[str]) -> None:
@@ -244,6 +261,7 @@ def _verify_self_run_scenario(
     )
 
     gateway = _mapping(components["gateway"], "components.gateway")
+    _verify_component_shape(gateway, "components.gateway")
     if gateway.get("manifest") != GATEWAY_MANIFEST:
         raise ValueError("gateway manifest is not pinned to the approved commit")
     gateway_config = _mapping(gateway.get("config"), "gateway.config")
@@ -261,12 +279,14 @@ def _verify_self_run_scenario(
     green = _mapping(
         components["officeqa_pro_v2_green"], "components.officeqa_pro_v2_green"
     )
+    _verify_component_shape(green, "components.officeqa_pro_v2_green")
     if green.get("manifest") != GREEN_MANIFEST:
         raise ValueError("green manifest is not pinned to the approved commit")
     if green.get("config") != {"hf_token": "${config.green_hf_token}"}:
         raise ValueError("green dataset token binding is not exact")
 
     purple = _mapping(components["opencode_agent"], "components.opencode_agent")
+    _verify_component_shape(purple, "components.opencode_agent")
     if purple.get("manifest") not in PURPLE_MANIFESTS:
         raise ValueError("purple manifest is not an approved OfficeQA proxy manifest")
     if purple.get("config") != {
@@ -292,6 +312,8 @@ def _verify_self_run_scenario(
         raise ValueError("scenario exports do not match the release topology")
 
     metadata = _mapping(scenario.get("metadata"), "scenario.metadata")
+    if set(metadata) != {"agentbeats_ids"}:
+        raise ValueError("self-run metadata fields are not exact")
     ids = _mapping(metadata.get("agentbeats_ids"), "metadata.agentbeats_ids")
     if set(ids) != {"officeqa_pro_v2_green", "agent", "opencode_agent"}:
         raise ValueError("self-run agentbeats_ids keys are not exact")
@@ -323,6 +345,7 @@ def _verify_generated_scenario(
     )
 
     gateway = _mapping(components["gateway"], "components.gateway")
+    _verify_component_shape(gateway, "components.gateway")
     if gateway.get("manifest") not in {GATEWAY_MANIFEST, GENERATED_GATEWAY_MANIFEST}:
         raise ValueError("generated gateway manifest is not the approved v0.3 manifest")
     gateway_config = _mapping(gateway.get("config"), "gateway.config")
@@ -348,12 +371,14 @@ def _verify_generated_scenario(
         raise ValueError("generated gateway participant_roles are not exact")
 
     green = _mapping(components["green"], "components.green")
+    _verify_component_shape(green, "components.green")
     if green.get("manifest") != GREEN_MANIFEST:
         raise ValueError("generated green manifest is not the approved pinned manifest")
     if green.get("config") != {"hf_token": "${config.green_hf_token}"}:
         raise ValueError("generated green dataset token binding is not exact")
 
     purple = _mapping(components["agent"], "components.agent")
+    _verify_component_shape(purple, "components.agent")
     if purple.get("manifest") not in PURPLE_MANIFESTS:
         raise ValueError("generated purple manifest is not approved")
     if purple.get("config") != {
@@ -379,6 +404,8 @@ def _verify_generated_scenario(
         raise ValueError("generated scenario exports are not exact")
 
     metadata = _mapping(scenario.get("metadata"), "scenario.metadata")
+    if set(metadata) != {"agentbeats_ids"}:
+        raise ValueError("generated metadata fields are not exact")
     ids = _mapping(metadata.get("agentbeats_ids"), "metadata.agentbeats_ids")
     if set(ids) != {"green", "agent"}:
         raise ValueError("generated agentbeats_ids keys are not exact")
@@ -390,6 +417,17 @@ def _verify_generated_scenario(
 
 
 def verify_scenario(scenario: dict[str, Any]) -> None:
+    expected_top_level = {
+        "manifest_version",
+        "experimental_features",
+        "config_schema",
+        "components",
+        "bindings",
+        "exports",
+        "metadata",
+    }
+    if set(scenario) != expected_top_level:
+        raise ValueError("scenario top-level fields are not exact")
     components = _mapping(scenario.get("components"), "scenario.components")
     component_names = set(components)
     if component_names == {"gateway", "officeqa_pro_v2_green", "opencode_agent"}:
@@ -400,26 +438,20 @@ def verify_scenario(scenario: dict[str, Any]) -> None:
         raise ValueError(f"unexpected scenario components: {sorted(components)}")
 
 
-def _find_shards(value: Any) -> list[dict[str, Any]]:
-    if isinstance(value, dict):
-        if value.get("benchmark") == BENCHMARK:
-            return [value]
-        shards: list[dict[str, Any]] = []
-        for child in value.values():
-            shards.extend(_find_shards(child))
-        return shards
-    if isinstance(value, list):
-        shards = []
-        for child in value:
-            shards.extend(_find_shards(child))
-        return shards
-    return []
-
-
-def verify_artifact(artifact: dict[str, Any], rows: list[dict[str, str]]) -> None:
+def verify_artifact(
+    artifact: dict[str, Any],
+    rows: list[dict[str, str]],
+    expected_participants: dict[str, Any] | None = None,
+) -> None:
+    if set(artifact) != {"status", "participants", "results"}:
+        raise ValueError("result artifact top-level fields are not exact")
     if artifact.get("status") != "completed":
         raise ValueError(f"result status is {artifact.get('status')!r}, not completed")
     participants = _mapping(artifact.get("participants"), "result participants")
+    if expected_participants is not None and participants != expected_participants:
+        raise ValueError(
+            "result participants do not exactly match the release scenario"
+        )
     if participants.get("agent") != PURPLE_AGENT_ID:
         raise ValueError(
             f"participants.agent is {participants.get('agent')!r}, "
@@ -435,10 +467,10 @@ def verify_artifact(artifact: dict[str, Any], rows: list[dict[str, str]]) -> Non
         for index in range(EXPECTED_SHARDS)
     }
     expected_uids = {row["uid"] for row in rows}
-    shards = _find_shards(artifact.get("results"))
-    if len(shards) != EXPECTED_SHARDS:
+    shards = artifact.get("results")
+    if not isinstance(shards, list) or len(shards) != EXPECTED_SHARDS:
         raise ValueError(
-            f"found {len(shards)} shard results, expected {EXPECTED_SHARDS}"
+            f"result must contain exactly {EXPECTED_SHARDS} direct shard objects"
         )
 
     seen_indices: set[int] = set()
@@ -446,6 +478,25 @@ def verify_artifact(artifact: dict[str, Any], rows: list[dict[str, str]]) -> Non
     total_score = 0.0
     total_max = 0.0
     for shard in shards:
+        if not isinstance(shard, dict):
+            raise TypeError("each shard result must be an object")
+        expected_shard_keys = {
+            "benchmark",
+            "dataset_revision",
+            "shard_index",
+            "num_shards",
+            "score",
+            "max_score",
+            "pass_rate",
+            "time_used",
+            "task_rewards",
+            "error_count",
+            "error_types",
+        }
+        if set(shard) != expected_shard_keys:
+            raise ValueError("shard result fields are not exact")
+        if shard.get("benchmark") != BENCHMARK:
+            raise ValueError(f"unexpected benchmark {shard.get('benchmark')!r}")
         if shard.get("dataset_revision") != DATASET_REVISION:
             raise ValueError(
                 f"unexpected dataset revision {shard.get('dataset_revision')!r}"
@@ -587,7 +638,11 @@ def main() -> int:
         verify_scenario(scenario)
         if args.command == "result":
             rows = load_dataset(args.dataset)
-            verify_artifact(_load_json(args.artifact), rows)
+            metadata = _mapping(scenario.get("metadata"), "scenario.metadata")
+            expected_participants = _mapping(
+                metadata.get("agentbeats_ids"), "metadata.agentbeats_ids"
+            )
+            verify_artifact(_load_json(args.artifact), rows, expected_participants)
             verify_provenance(
                 _load_json(args.provenance),
                 expected_run_url=args.expected_run_url,
