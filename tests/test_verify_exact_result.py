@@ -729,40 +729,24 @@ def test_working_runner_matches_the_immutable_caller_pin() -> None:
     assert working_runner == _frozen_runner()
 
 
-def test_quick_submit_calls_repository_owned_runner() -> None:
+def test_quick_submit_calls_agentbeats_v2_runner() -> None:
     workflow = (ROOT / ".github/workflows/quick-submit.yml").read_text()
     trigger = workflow.split("jobs:", maxsplit=1)[0]
-    assert "\n  pull_request_target:\n" in trigger
-    assert "\n  pull_request:\n" not in trigger
+    assert "\n  pull_request:\n" in trigger
+    assert "\n  pull_request_target:\n" not in trigger
     assert "\n  push:\n" not in trigger
     assert "\n  workflow_dispatch:\n" not in trigger
-    assert "types: [opened]" in workflow
+    assert "types: [opened, reopened]" in workflow
     assert "branches: [main]" in workflow
-    assert "github.run_attempt == 1" in workflow
-    assert "github.actor == 'agentbeats-dev[bot]'" in workflow
-    assert "github.triggering_actor == 'agentbeats-dev[bot]'" in workflow
-    assert "github.event.pull_request.user.login == 'agentbeats-dev[bot]'" in workflow
+    assert "startsWith(github.head_ref, 'quick-submit-')" in workflow
     assert (
-        "github.event.pull_request.head.repo.full_name == github.repository" in workflow
+        "uses: RDI-Foundation/agentbeats-leaderboard-template/"
+        ".github/workflows/quick-submit-runner.yml@v2" in workflow
     )
-    assert "startsWith(github.event.pull_request.head.ref, 'quick-submit-')" in workflow
-    runner_match = re.search(
-        r"uses: onejumpinc/officeqa-pro-v2-agentbeats/"
-        r"\.github/workflows/quick-submit-runner\.yml@([0-9a-f]{40})",
-        workflow,
-    )
-    input_match = re.search(r"trusted_runner_sha: ([0-9a-f]{40})", workflow)
-    assert runner_match is not None
-    assert input_match is not None
-    assert runner_match.group(1) == input_match.group(1) == FROZEN_RUNNER_SHA
-    assert (
-        "permissions:\n      id-token: write\n      contents: write\n      packages: read"
-        in workflow
-    )
-    assert workflow.count("secrets.") == 1
-    assert "toJSON(secrets.OFFICEQA_PRO_V2_HF_TOKEN)" in workflow
-    assert "uses: ./.github/workflows/quick-submit-runner.yml" not in workflow
-    assert "RDI-Foundation/agentbeats-leaderboard-template" not in workflow
+    assert "permissions:\n      id-token: write\n      contents: write" in workflow
+    assert "num_shards: 10" in workflow
+    assert "trusted_runner_sha" not in workflow
+    assert "secrets." not in workflow
 
 
 def test_manual_workflow_is_main_only_environment_gated_and_pinned() -> None:

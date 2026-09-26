@@ -5,11 +5,9 @@ release must answer all 90 pinned questions correctly across 10 deterministic
 shards, with no evaluation errors. Smoke runs and partial results cannot pass
 the release verifier.
 
-Both workflows fail closed before writing a result branch unless the scenario,
-Git tree, manifests, containers, provenance, dataset, and final score all match
-the pinned release. Quick Submit never checks out or executes the submitted pull
-request. It treats the one allowed scenario file as data and materializes it by
-Git object ID.
+The manual release workflow retains the repository's exact-release verifier.
+Quick Submit uses AgentBeats' required official v2 reusable runner and receives
+the participant and green secrets from AgentBeats' encrypted submission bundle.
 
 ## Current release state
 
@@ -17,9 +15,10 @@ The green benchmark is registered on AgentBeats as
 `01a0db6d-5b2b-7551-9ab3-45b9ae72080c`, and that UUID is pinned in both
 `scenario.json5` and `tools/verify_exact_result.py`.
 
-The registered scenario, verifier, tools, tests, and reusable runner are frozen
-at `94a8460f564887bbdcb8819e1b0368da6e89c46a`. The Quick Submit caller pins that
-exact runner commit; branches and tags are not used for release execution.
+The registered scenario and exact verifier are frozen at
+`94a8460f564887bbdcb8819e1b0368da6e89c46a`. Quick Submit delegates to
+`RDI-Foundation/agentbeats-leaderboard-template/.github/workflows/quick-submit-runner.yml@v2`,
+as required by the AgentBeats submission service.
 
 ## Immutable release inputs
 
