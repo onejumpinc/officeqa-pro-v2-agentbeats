@@ -8,6 +8,8 @@ on:
       - 'green-agent.json5'
       - 'tools/**'
       - 'tests/**'
+      - 'results/**'
+      - 'submissions/**'
   push:
     branches: [main]
     paths:
@@ -23,6 +25,7 @@ permissions:
 
 jobs:
   verify:
+    if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'submission-') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -55,3 +58,109 @@ jobs:
               yaml.safe_load(path.read_text())
               print(f'YAML OK: {path}')
           PY
+
+  verify-manual-submission:
+    if: ${{ github.event_name == 'pull_request' && startsWith(github.head_ref, 'submission-') }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Checkout trusted base release gate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+
+      - name: Fetch public result evidence without executing fork code
+        id: evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 "${RUNNER_TEMP}/manual-evidence"
+          evidence_dir="${RUNNER_TEMP}/manual-evidence"
+          gh api "repos/${BASE_REPOSITORY}/pulls/${PR_NUMBER}/files" \
+            --paginate > "${evidence_dir}/changed-files.json"
+          result_path="$(jq -er '
+            [.[] | select(.status == "added") | .filename |
+              select(test("^results/[A-Za-z0-9_.-]+-[0-9]+[.]json$"))] |
+            if length == 1 then .[0] else error("expected one result path") end
+          ' "${evidence_dir}/changed-files.json")"
+          unique_name="${result_path#results/}"
+          unique_name="${unique_name%.json}"
+          scenario_path="submissions/${unique_name}.json5"
+          provenance_path="submissions/${unique_name}-provenance.json"
+          if ! jq -e --arg result "${result_path}" --arg scenario "${scenario_path}" \
+            --arg provenance "${provenance_path}" '
+              length == 3 and
+              all(.[]; .status == "added") and
+              ([.[].filename] | sort) == ([$result, $scenario, $provenance] | sort)
+            ' "${evidence_dir}/changed-files.json" >/dev/null; then
+            echo "Manual result PR must add only its result, scenario, and provenance" >&2
+            exit 1
+          fi
+          fetch_content() {
+            local repository="$1" path="$2" ref="$3" output="$4"
+            gh api "repos/${repository}/contents/${path}?ref=${ref}" --jq '.content' |
+              tr -d '\n' | base64 --decode > "${output}"
+          }
+          fetch_content "${PR_HEAD_REPOSITORY}" "${result_path}" "${PR_HEAD_SHA}" \
+            "${evidence_dir}/results.json"
+          fetch_content "${PR_HEAD_REPOSITORY}" "${scenario_path}" "${PR_HEAD_SHA}" \
+            "${evidence_dir}/scenario.json5"
+          fetch_content "${PR_HEAD_REPOSITORY}" "${provenance_path}" "${PR_HEAD_SHA}" \
+            "${evidence_dir}/provenance.json"
+          run_id="$(jq -er '
+            .github_actions.run_url |
+            capture("/actions/runs/(?<id>[0-9]+)$").id
+          ' "${evidence_dir}/provenance.json")"
+          gh api "repos/${PR_HEAD_REPOSITORY}/actions/runs/${run_id}" \
+            > "${evidence_dir}/run.json"
+          gh api "repos/${PR_HEAD_REPOSITORY}" > "${evidence_dir}/repository.json"
+          source_sha="$(jq -er '.head_sha | select(test("^[0-9a-f]{40}$"))' \
+            "${evidence_dir}/run.json")"
+          fetch_content "${PR_HEAD_REPOSITORY}" scenario.json5 "${source_sha}" \
+            "${evidence_dir}/source-scenario.json5"
+          install -d -m 700 "${evidence_dir}/source-controls"
+          for path in \
+            .github/workflows/run-scenario.yml \
+            green-agent.json5 \
+            tools/docker_release_wrapper.sh \
+            tools/fetch_pinned_dataset.py \
+            tools/verify_exact_result.py; do
+            output="${evidence_dir}/source-controls/${path//\//__}"
+            fetch_content "${PR_HEAD_REPOSITORY}" "${path}" "${source_sha}" "${output}"
+            if ! cmp --silent -- "${path}" "${output}"; then
+              echo "Fork run changed canonical release control: ${path}" >&2
+              exit 1
+            fi
+          done
+          echo "evidence_dir=${evidence_dir}" >> "${GITHUB_OUTPUT}"
+
+      - name: Verify canonical fork run and exact 90/90 result
+        env:
+          EVIDENCE_DIR: ${{ steps.evidence.outputs.evidence_dir }}
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          PYTHONPATH=. python3 tools/verify_manual_submission.py \
+            --result "${EVIDENCE_DIR}/results.json" \
+            --provenance "${EVIDENCE_DIR}/provenance.json" \
+            --scenario "${EVIDENCE_DIR}/scenario.json5" \
+            --source-scenario "${EVIDENCE_DIR}/source-scenario.json5" \
+            --changed-files "${EVIDENCE_DIR}/changed-files.json" \
+            --run-metadata "${EVIDENCE_DIR}/run.json" \
+            --repository-metadata "${EVIDENCE_DIR}/repository.json" \
+            --head-repository "${PR_HEAD_REPOSITORY}" \
+            --head-ref "${PR_HEAD_REF}" \
+            --head-sha "${PR_HEAD_SHA}" \
+            --base-repository "${BASE_REPOSITORY}"

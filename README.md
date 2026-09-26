@@ -5,10 +5,12 @@ release must answer all 90 pinned questions correctly across 10 deterministic
 shards, with no evaluation errors. Smoke runs and partial results cannot pass
 the release verifier.
 
-Quick Submit is the only enabled public execution path. It uses AgentBeats'
-required official v2 reusable runner and receives the participant and green
-secrets from AgentBeats' encrypted submission bundle. No `workflow_dispatch`
-or other manual release workflow is installed.
+Two official public execution paths are enabled. Quick Submit uses AgentBeats'
+required official v2 reusable runner and receives participant secrets from the
+encrypted AgentBeats submission bundle. The hardened fork/self-run path uses
+only secrets owned by the submitter's public fork, runs the same exact 10-shard
+release, and opens an upstream result pull request after the 90/90 verifier
+passes.
 
 ## Current release state
 
@@ -80,8 +82,9 @@ Configure these controls outside the workflow:
    review for `.github/workflows/**`, `tools/**`, `scenario.json5`, `results/**`,
    and `submissions/**`. Disable force-push, deletion, and admin bypass.
 3. Permit the GitHub Actions bot to update only the expected `quick-submit-*`
-   branch and to create the generated `submission-*` branch. Compare-and-swap
-   leases prevent overwriting an unexpected branch state.
+   branch. A fork/self-run pushes its generated `submission-*` branch only to
+   the submitter's fork. Compare-and-swap leases prevent overwriting an
+   unexpected branch state.
 4. Install the AgentBeats GitHub App with minimum repository permissions. It
    must not have Actions/workflow-dispatch permission beyond what the service
    explicitly requires.
@@ -96,12 +99,21 @@ request with GitHub OIDC.
 
 ## Secret boundary
 
-Quick Submit obtains participant and green secrets only from AgentBeats'
-encrypted, submission-scoped bundle. The repository does not expose a manual
-workflow that can read benchmark credentials. Do not add a
-`workflow_dispatch`, `push`, or ad-hoc fallback runner to work around an
-AgentBeats authentication failure; the platform OIDC trust policy must be fixed
-instead.
+Quick Submit obtains participant secrets from AgentBeats' encrypted,
+submission-scoped bundle. The fork/self-run route does not call AgentBeats'
+Quick Submit secrets endpoint and cannot read secrets from this upstream
+repository. Each submitter stores these three Actions secrets in their own
+fork:
+
+- `GREEN_HF_TOKEN`
+- `PARTICIPANT_API_URL`
+- `PARTICIPANT_API_TOKEN`
+
+The workflow validates and masks the values, writes them to a mode-0600
+temporary env file, deletes that file immediately after container startup, and
+never commits them. The result PR contains only the result JSON, the exact
+scenario, and provenance JSON. Keep the fork public so the upstream gate can
+verify the source workflow run; never put a token directly in `scenario.json5`.
 
 ## External identity checks
 
@@ -122,11 +134,34 @@ validate, at minimum:
 The workflow's own claim checks are defense in depth; the backend and WIF
 attribute conditions are the actual authorization boundary.
 
-## Manual execution disabled
+## Hardened fork/self-run submission
 
-There is intentionally no manual release workflow. Public results must enter
-through an AgentBeats-created `quick-submit-<uuid>` pull request and the
-official reusable Quick Submit runner.
+The manual route follows AgentBeats' official fork workflow while retaining the
+OfficeQA exact-release controls:
+
+1. Create a **public fork** of this repository and enable read/write Workflow
+   permissions in the fork's Actions settings.
+2. Sync the fork with current upstream `main`, create a non-`main` branch, and
+   add the three fork-owned secrets listed above.
+3. Keep `scenario.json5` on the approved OfficeQA Pro v2 topology and registered
+   participant. The verifier rejects partial runs, alternate images, changed
+   release controls, and unapproved participant identities.
+4. Run **Run Scenario** with `workflow_dispatch` while the non-`main` branch is
+   selected. A push changing `scenario.json5` on a non-`main` branch also
+   triggers it.
+5. Ten shards start concurrently. The workflow aggregates only ten completed
+   shards, checks all 90 pinned tasks, requires 90/90 with zero errors, and
+   records immutable image, manifest, tool, workflow, and result hashes.
+6. After verification, use the Actions summary link to open the generated
+   `submission-<owner>-<run-id>` branch as a pull request to upstream `main`.
+   Leave **Allow edits and access to secrets by maintainers** unchecked.
+
+The upstream `Verify Release Gate` checks that the PR adds exactly
+`results/<submission>.json`, `submissions/<submission>.json5`, and
+`submissions/<submission>-provenance.json`. It retrieves the referenced public
+Actions run, requires a successful first attempt, compares the run's workflow
+and release tools byte-for-byte with trusted upstream files, and re-validates
+the exact result and provenance without executing code from the fork.
 
 ## Local validation
 
@@ -147,6 +182,5 @@ The two ignored ShellCheck codes are style-only findings in the already frozen
 runner (`SC2129` and `SC2004`); no security or syntax diagnostic is ignored.
 
 Finally, paste `leaderboard-query.json` into the registered green agent's
-leaderboard configuration. Do not start a public Action or submit a leaderboard
-run until the green ID, environment policy, OIDC/WIF conditions, branch rules,
-and new immutable runner pin have all been independently verified.
+leaderboard configuration. Before accepting a result, verify the green ID,
+branch rules, Quick Submit OIDC/WIF conditions, and fork-run provenance.
