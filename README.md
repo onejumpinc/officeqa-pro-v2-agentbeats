@@ -13,19 +13,17 @@ Git object ID.
 
 ## Current release state
 
-Public execution is intentionally blocked. `REPLACE_WITH_GREEN_AGENT_ID` is
-still present in both `scenario.json5` and `tools/verify_exact_result.py`, so the
-setup verifier exits before benchmark containers or benchmark secrets are used.
-The Quick Submit cleanup job may still authenticate to report the failed run;
-it cannot start the benchmark or obtain its encrypted participant secrets. Do
-not push, register, or dispatch this release until the real green AgentBeats ID
-is pinned and the checklist below is complete.
+The green benchmark is registered on AgentBeats as
+`01a0db6d-5b2b-7551-9ab3-45b9ae72080c`, and that UUID is pinned in both
+`scenario.json5` and `tools/verify_exact_result.py`.
 
-The currently frozen reusable runner is
-`88431878691255f904990142f754f45041161e06`. It is useful for reviewing the
-immutable caller contract, but it contains the registration placeholder and
-therefore cannot produce a release. Registration requires a new runner commit
-and a second caller-pin commit.
+Public execution remains blocked until the registered scenario, verifier,
+tools, tests, and reusable runner are committed together, all 10 shards are
+recompiled and validated, and a separate caller-pin commit points
+`.github/workflows/quick-submit.yml` at that new frozen runner SHA. The
+currently frozen reusable runner is
+`88431878691255f904990142f754f45041161e06`; it predates registration and must
+not be used for a release.
 
 ## Immutable release inputs
 
@@ -36,6 +34,7 @@ and a second caller-pin commit.
 - Dataset semantic SHA-256:
   `e8dbf350a9e0dd1be8464744a012f17dba6605cd2a7f1e850c06dcc3562cab54`
 - Approved purple AgentBeats ID: `01a05b80-58e6-7e71-95e9-656bde816e85`
+- Registered green AgentBeats ID: `01a0db6d-5b2b-7551-9ab3-45b9ae72080c`
 - Green image:
   `ghcr.io/onejumpinc/officeqa-pro-v2-benchmark@sha256:79db435c4a563090391fcbc3b9b656850efc3a04746de6e20982c39702740ff7`
 - Purple proxy image:
