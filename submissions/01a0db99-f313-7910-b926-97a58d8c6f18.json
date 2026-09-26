@@ -1,0 +1,85 @@
+{
+  "manifest_version": "0.1.0",
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "agent_officeqa_api_token": {
+        "type": "string",
+        "secret": true
+      },
+      "agent_officeqa_api_url": {
+        "type": "string",
+        "secret": true
+      },
+      "green_hf_token": {
+        "type": "string",
+        "secret": true
+      }
+    },
+    "required": [
+      "green_hf_token",
+      "agent_officeqa_api_url",
+      "agent_officeqa_api_token"
+    ],
+    "additionalProperties": false
+  },
+  "components": {
+    "gateway": {
+      "manifest": "https://raw.githubusercontent.com/RDI-Foundation/agentbeats-gateway/refs/tags/v0.3/amber-manifest.json5",
+      "config": {
+        "assessment_config": {
+          "tolerance": 0,
+          "timeout_seconds": 900,
+          "num_shards": 10
+        },
+        "participant_roles": {
+          "green": "green",
+          "purple1": "agent"
+        },
+        "callback_urls": {}
+      }
+    },
+    "green": {
+      "manifest": "https://raw.githubusercontent.com/onejumpinc/officeqa-pro-v2-agentbeats/9ac7f2c39d16e13b2e10ddb3f73c63cdc9d278ad/green-agent.json5",
+      "config": {
+        "hf_token": "${config.green_hf_token}"
+      }
+    },
+    "agent": {
+      "manifest": "https://raw.githubusercontent.com/onejumpinc/officeqa-agentbeats/main/amber-manifest.json5",
+      "config": {
+        "officeqa_api_token": "${config.agent_officeqa_api_token}",
+        "officeqa_api_url": "${config.agent_officeqa_api_url}"
+      }
+    }
+  },
+  "bindings": [
+    {
+      "to": "#gateway.green",
+      "from": "#green.a2a"
+    },
+    {
+      "to": "#gateway.purple1",
+      "from": "#agent.a2a"
+    },
+    {
+      "to": "#green.proxy",
+      "from": "#gateway.proxy",
+      "weak": true
+    },
+    {
+      "to": "#agent.proxy",
+      "from": "#gateway.proxy",
+      "weak": true
+    }
+  ],
+  "exports": {
+    "results": "#gateway.results"
+  },
+  "metadata": {
+    "agentbeats_ids": {
+      "green": "01a0db6d-5b2b-7551-9ab3-45b9ae72080c",
+      "agent": "01a05b80-58e6-7e71-95e9-656bde816e85"
+    }
+  }
+}
