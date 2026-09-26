@@ -5,9 +5,10 @@ release must answer all 90 pinned questions correctly across 10 deterministic
 shards, with no evaluation errors. Smoke runs and partial results cannot pass
 the release verifier.
 
-The manual release workflow retains the repository's exact-release verifier.
-Quick Submit uses AgentBeats' required official v2 reusable runner and receives
-the participant and green secrets from AgentBeats' encrypted submission bundle.
+Quick Submit is the only enabled public execution path. It uses AgentBeats'
+required official v2 reusable runner and receives the participant and green
+secrets from AgentBeats' encrypted submission bundle. No `workflow_dispatch`
+or other manual release workflow is installed.
 
 ## Current release state
 
@@ -84,59 +85,23 @@ Configure these controls outside the workflow:
 4. Install the AgentBeats GitHub App with minimum repository permissions. It
    must not have Actions/workflow-dispatch permission beyond what the service
    explicitly requires.
-5. Add an Actions event policy that explicitly allows `pull_request_target`
-   only for `.github/workflows/quick-submit.yml` and the expected AgentBeats bot.
-   GitHub's public-repository default is currently in evaluation mode and will
-   block `pull_request_target` on November 2, 2026 unless an applicable policy
-   allows it. See [Securely using `pull_request_target`](https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target)
-   and [About Actions policies](https://docs.github.com/en/actions/concepts/about-actions-policies).
-6. Keep CodeQL's GitHub Actions analysis enabled and review Actions policy
+5. Keep CodeQL's GitHub Actions analysis enabled and review Actions policy
    insights before enforcement.
 
 Quick Submit accepts only a first-attempt, `opened`, same-repository pull
 request authored and triggered by `agentbeats-dev[bot]`, targeting `main`, with
-a canonical `quick-submit-<uuid>` branch. The reusable runner additionally
-requires the exact caller and runner SHAs, an exact one-file Git tree, and the
-expected OIDC claims.
+a canonical `quick-submit-<uuid>` branch. AgentBeats' official reusable runner
+derives the submission ID from that branch and authenticates its secret-bundle
+request with GitHub OIDC.
 
 ## Secret boundary
 
-Create a GitHub Environment named `officeqa-production`. Its deployment branch
-policy must use **Selected branches** with the one exact branch `main`; do not
-use a wildcard or “protected branches only.” Do not allow environment bypass.
-The manual workflow's `eval` and `summary` jobs reference this environment.
-Require a reviewer for manual releases while Quick Submit remains disabled. If
-an automatic Quick Submit flow later shares this environment, either retain a
-per-release approval or use a separate exact-main environment governed by the
-same actor and event policy; do not silently remove the approval boundary.
-
-Store these three values only as environment secrets:
-
-- `GREEN_HF_TOKEN`
-- `PARTICIPANT_API_URL`
-- `PARTICIPANT_API_TOKEN`
-
-Delete any repository- or organization-level copies and rotate the values after
-the move. Explicitly delete, or do not create,
-`OFFICEQA_PRO_V2_HF_TOKEN` at repository or organization scope; rotate the
-underlying Hugging Face token if that legacy secret ever existed. A
-branch-modified manual workflow must receive no usable benchmark secret when the
-environment's exact-main rule rejects it.
-
-The current frozen Quick Submit runner still references
-`OFFICEQA_PRO_V2_HF_TOKEN` from the caller. Leave it unset: the runner rejects an
-empty value safely, and this public path is intentionally disabled. The
-preferred final runner stores the raw token as the
-environment secret `GREEN_HF_TOKEN`, places only its `eval` and `summary` jobs
-in `officeqa-production`, and removes the caller secret mapping. That change
-alters the default GitHub OIDC `sub` to
-`repo:onejumpinc/officeqa-pro-v2-agentbeats:environment:officeqa-production`.
-AgentBeats and the GCP Workload Identity provider must confirm or update their
-conditions before that runner is frozen and repinned. The environment-scoped
-`eval` token and non-environment `cleanup` token have different `sub` claims;
-the backend must authorize each endpoint with the appropriate exact form or the
-cleanup call will fail. Never store a JSON-wrapped token as the environment
-secret.
+Quick Submit obtains participant and green secrets only from AgentBeats'
+encrypted, submission-scoped bundle. The repository does not expose a manual
+workflow that can read benchmark credentials. Do not add a
+`workflow_dispatch`, `push`, or ad-hoc fallback runner to work around an
+AgentBeats authentication failure; the platform OIDC trust policy must be fixed
+instead.
 
 ## External identity checks
 
@@ -145,26 +110,23 @@ validate, at minimum:
 
 - audience `agentbeats-quick-submit-production`
 - repository name and immutable repository ID
-- `event_name == pull_request_target`
+- `event_name == pull_request`
 - actor, triggering actor, and pull-request author `agentbeats-dev[bot]`
 - head repository, canonical head branch, base branch, event ref, and event SHA
 - caller `workflow_ref` and `workflow_sha`
 - reusable `job_workflow_ref` and `job_workflow_sha`
 - `run_attempt == 1` and the expected runner environment
-- the `officeqa-production` environment claim and revised `sub`, if the final
-  environment-secret design is adopted
-- the distinct non-environment `sub` for the cleanup-only completion endpoint
+- GitHub's immutable repository subject format for repositories created after
+  July 15, 2026
 
 The workflow's own claim checks are defense in depth; the backend and WIF
 attribute conditions are the actual authorization boundary.
 
-## Manual exact run
+## Manual execution disabled
 
-`run-scenario.yml` is `workflow_dispatch`-only and accepts no shard or instance
-inputs. Dispatch it from protected `main`. It verifies the workflow identity,
-pins every action and image, runs exactly 10 shards, validates the final 90/90
-artifact against the pinned dataset, and only then creates a new
-`submission-<owner>-<run-id>` branch. It never overwrites an existing branch.
+There is intentionally no manual release workflow. Public results must enter
+through an AgentBeats-created `quick-submit-<uuid>` pull request and the
+official reusable Quick Submit runner.
 
 ## Local validation
 

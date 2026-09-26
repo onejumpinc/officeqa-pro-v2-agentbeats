@@ -686,11 +686,8 @@ def test_dataset_redirect_does_not_forward_token_cross_host() -> None:
 
 
 def test_public_workflows_gate_before_any_result_write() -> None:
-    self_run = (ROOT / ".github/workflows/run-scenario.yml").read_text()
     quick_run = _frozen_runner()
-    assert self_run.index("Verify exact 90/90 release") < self_run.index(
-        "Create submission branch and commit results"
-    )
+    assert not (ROOT / ".github/workflows/run-scenario.yml").exists()
     assert quick_run.index("Verify exact 90/90 release") < quick_run.index(
         "Create verified result commit without a worktree"
     )
@@ -749,46 +746,11 @@ def test_quick_submit_calls_agentbeats_v2_runner() -> None:
     assert "secrets." not in workflow
 
 
-def test_manual_workflow_is_main_only_environment_gated_and_pinned() -> None:
-    workflow = (ROOT / ".github/workflows/run-scenario.yml").read_text()
-    trigger = workflow.split("jobs:", maxsplit=1)[0]
-    assert "\n  workflow_dispatch:\n" in trigger
-    assert "\n  pull_request:\n" not in trigger
-    assert "\n  pull_request_target:\n" not in trigger
-    assert "\n  push:\n" not in trigger
-    assert workflow.count("environment: officeqa-production") == 2
-    setup_job, remaining_jobs = workflow.split("\n  eval:\n", maxsplit=1)
-    eval_job, summary_job = remaining_jobs.split("\n  summary:\n", maxsplit=1)
-    assert "environment: officeqa-production" not in setup_job
-    assert "environment: officeqa-production" in eval_job
-    assert "environment: officeqa-production" in summary_job
-    assert workflow.count("secrets.GREEN_HF_TOKEN") == 2
-    assert workflow.count("secrets.PARTICIPANT_API_URL") == 1
-    assert workflow.count("secrets.PARTICIPANT_API_TOKEN") == 1
-    assert "id-token: write" not in workflow
-    assert "EVENT_REF: ${{ github.ref }}" in workflow
-    assert (
-        workflow.count(
-            "if: ${{ github.run_attempt == 1 && github.actor == github.triggering_actor }}"
-        )
-        == 3
-    )
-    assert "expected_repository='onejumpinc/officeqa-pro-v2-agentbeats'" in workflow
-    assert (
-        'expected_workflow_ref="${GITHUB_REPOSITORY}/.github/workflows/'
-        'run-scenario.yml@refs/heads/main"' in workflow
-    )
-    assert '"${EVENT_REF}" != "refs/heads/main"' in workflow
-    assert '"${WORKFLOW_SHA}" != "${EVENT_SHA}"' in workflow
-    assert workflow.count("--require-kind self-run") == 4
-    assert workflow.count("persist-credentials: false") == 3
-    assert all("${{" not in block for block in _workflow_run_blocks(workflow))
-
-    uses = re.findall(r"^\s+uses:\s+(\S+)", workflow, flags=re.MULTILINE)
-    assert uses
-    assert all(re.fullmatch(r"[^@\s]+@[0-9a-f]{40}", value) for value in uses)
-    assert workflow.index("Verify exact 90/90 release") < workflow.index(
-        "Create submission branch and commit results"
-    )
-    assert '--force-with-lease="refs/heads/${BRANCH_NAME}:"' in workflow
-    assert 'echo "::add-mask::${basic_auth}"' in workflow
+def test_manual_workflow_is_disabled() -> None:
+    assert not (ROOT / ".github/workflows/run-scenario.yml").exists()
+    workflow_names = {
+        workflow_path.name
+        for workflow_path in (ROOT / ".github/workflows").glob("*.yml")
+    }
+    assert "manual-run.yml" not in workflow_names
+    assert "manual-release.yml" not in workflow_names
