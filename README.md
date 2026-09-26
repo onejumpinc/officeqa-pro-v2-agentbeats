@@ -17,13 +17,9 @@ The green benchmark is registered on AgentBeats as
 `01a0db6d-5b2b-7551-9ab3-45b9ae72080c`, and that UUID is pinned in both
 `scenario.json5` and `tools/verify_exact_result.py`.
 
-Public execution remains blocked until the registered scenario, verifier,
-tools, tests, and reusable runner are committed together, all 10 shards are
-recompiled and validated, and a separate caller-pin commit points
-`.github/workflows/quick-submit.yml` at that new frozen runner SHA. The
-currently frozen reusable runner is
-`88431878691255f904990142f754f45041161e06`; it predates registration and must
-not be used for a release.
+The registered scenario, verifier, tools, tests, and reusable runner are frozen
+at `94a8460f564887bbdcb8819e1b0368da6e89c46a`. The Quick Submit caller pins that
+exact runner commit; branches and tags are not used for release execution.
 
 ## Immutable release inputs
 

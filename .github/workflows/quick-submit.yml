@@ -14,14 +14,14 @@ jobs:
           github.event.pull_request.user.login == 'agentbeats-dev[bot]' &&
           github.event.pull_request.head.repo.full_name == github.repository &&
           startsWith(github.event.pull_request.head.ref, 'quick-submit-') }}
-    uses: onejumpinc/officeqa-pro-v2-agentbeats/.github/workflows/quick-submit-runner.yml@88431878691255f904990142f754f45041161e06
+    uses: onejumpinc/officeqa-pro-v2-agentbeats/.github/workflows/quick-submit-runner.yml@94a8460f564887bbdcb8819e1b0368da6e89c46a
     permissions:
       id-token: write
       contents: write
       packages: read
     with:
       num_shards: 10
-      trusted_runner_sha: 88431878691255f904990142f754f45041161e06
+      trusted_runner_sha: 94a8460f564887bbdcb8819e1b0368da6e89c46a
     secrets:
       GREEN_SECRETS_JSON: >-
         {"hf_token":${{ toJSON(secrets.OFFICEQA_PRO_V2_HF_TOKEN) }}}
