@@ -38,6 +38,7 @@ from tools.verify_exact_result import (
     verify_rendered_compose,
     verify_scenario,
 )
+from tools.verify_manual_submission import verify_submission
 
 ROOT = Path(__file__).resolve().parents[1]
 TEST_GREEN_AGENT_ID = "11111111-1111-4111-8111-111111111111"
@@ -687,9 +688,12 @@ def test_dataset_redirect_does_not_forward_token_cross_host() -> None:
 
 def test_public_workflows_gate_before_any_result_write() -> None:
     quick_run = _frozen_runner()
-    assert not (ROOT / ".github/workflows/run-scenario.yml").exists()
+    manual_run = (ROOT / ".github/workflows/run-scenario.yml").read_text()
     assert quick_run.index("Verify exact 90/90 release") < quick_run.index(
         "Create verified result commit without a worktree"
+    )
+    assert manual_run.index("Verify exact 90/90 release") < manual_run.index(
+        "Create submission branch and commit results"
     )
     assert "ref: ${{ github.event.pull_request.head.sha }}" not in quick_run
     assert "git checkout" not in quick_run
@@ -719,6 +723,11 @@ def test_public_workflows_gate_before_any_result_write() -> None:
     assert "docker-runtime-images" in quick_run
     assert all("${{" not in block for block in _workflow_run_blocks(quick_run))
     assert ".release-gate/tools/fetch_pinned_dataset.py" in quick_run
+    assert all("${{" not in block for block in _workflow_run_blocks(manual_run))
+    assert "agentbeats.dev/api/quick-submit" not in manual_run
+    assert "GREEN_HF_TOKEN: ${{ secrets.GREEN_HF_TOKEN }}" in manual_run
+    assert "PARTICIPANT_API_URL: ${{ secrets.PARTICIPANT_API_URL }}" in manual_run
+    assert "PARTICIPANT_API_TOKEN: ${{ secrets.PARTICIPANT_API_TOKEN }}" in manual_run
 
 
 def test_working_runner_matches_the_immutable_caller_pin() -> None:
@@ -746,11 +755,141 @@ def test_quick_submit_calls_agentbeats_v2_runner() -> None:
     assert "secrets." not in workflow
 
 
-def test_manual_workflow_is_disabled() -> None:
-    assert not (ROOT / ".github/workflows/run-scenario.yml").exists()
-    workflow_names = {
-        workflow_path.name
-        for workflow_path in (ROOT / ".github/workflows").glob("*.yml")
+def test_manual_workflow_is_hardened_fork_self_run() -> None:
+    workflow = (ROOT / ".github/workflows/run-scenario.yml").read_text()
+    trigger = workflow.split("env:", maxsplit=1)[0]
+    assert "\n  push:\n" in trigger
+    assert "\n  workflow_dispatch:\n" in trigger
+    assert "branches-ignore:" in trigger
+    assert "- main" in trigger
+    assert "public fork of ${target_repository}" in workflow
+    assert ".parent.full_name == $target" in workflow
+    assert "git merge-base --is-ancestor" in workflow
+    assert "Require canonical release controls and scenario" in workflow
+    assert "shard_indices=[0,1,2,3,4,5,6,7,8,9]" in workflow
+    assert "num_shards = 10" in workflow
+    assert "--require-kind self-run" in workflow
+    assert "--force-with-lease" in workflow
+    assert "Open the upstream result pull request" in workflow
+    assert "environment: officeqa-production" not in workflow
+
+
+def test_manual_submission_evidence_passes(tmp_path: Path) -> None:
+    dataset_path, rows = _dataset(tmp_path)
+    del dataset_path
+    scenario = _scenario()
+    artifact = _artifact(rows)
+    artifact["participants"] = scenario["metadata"]["agentbeats_ids"]
+
+    head_repository = "forker/officeqa-pro-v2-agentbeats"
+    source_branch = "benchmark"
+    source_sha = "a" * 40
+    result_sha = "b" * 40
+    run_id = 123
+    unique_name = f"forker-{run_id}"
+    run_url = f"https://github.com/{head_repository}/actions/runs/{run_id}"
+    workflow_ref = (
+        f"{head_repository}/.github/workflows/run-scenario.yml@"
+        f"refs/heads/{source_branch}"
+    )
+
+    result_path = tmp_path / "results.json"
+    result_path.write_text(json.dumps(artifact))
+    provenance = _provenance()
+    provenance["results_sha256"] = hashlib.sha256(result_path.read_bytes()).hexdigest()
+    provenance["github_actions"] = {
+        "run_url": run_url,
+        "ref": f"refs/heads/{source_branch}",
+        "sha": source_sha,
+        "repository_url": f"https://github.com/{head_repository}",
+        "workflow_ref": workflow_ref,
+        "workflow_sha": source_sha,
+        "job_workflow_ref": workflow_ref,
+        "job_workflow_sha": source_sha,
+        "run_attempt": 1,
     }
-    assert "manual-run.yml" not in workflow_names
-    assert "manual-release.yml" not in workflow_names
+    provenance_path = tmp_path / "provenance.json"
+    provenance_path.write_text(json.dumps(provenance))
+    scenario_path = tmp_path / "scenario.json5"
+    source_scenario_path = tmp_path / "source-scenario.json5"
+    scenario_bytes = json.dumps(scenario).encode()
+    scenario_path.write_bytes(scenario_bytes)
+    source_scenario_path.write_bytes(scenario_bytes)
+    changed_files_path = tmp_path / "changed-files.json"
+    changed_files_path.write_text(
+        json.dumps(
+            [
+                {"filename": f"results/{unique_name}.json", "status": "added"},
+                {
+                    "filename": f"submissions/{unique_name}.json5",
+                    "status": "added",
+                },
+                {
+                    "filename": f"submissions/{unique_name}-provenance.json",
+                    "status": "added",
+                },
+            ]
+        )
+    )
+    run_metadata_path = tmp_path / "run.json"
+    run_metadata_path.write_text(
+        json.dumps(
+            {
+                "id": run_id,
+                "run_attempt": 1,
+                "event": "workflow_dispatch",
+                "status": "completed",
+                "conclusion": "success",
+                "path": ".github/workflows/run-scenario.yml",
+                "repository": {"full_name": head_repository},
+                "actor": {"login": "forker"},
+                "triggering_actor": {"login": "forker"},
+                "head_sha": source_sha,
+                "head_branch": source_branch,
+                "html_url": run_url,
+            }
+        )
+    )
+    repository_metadata_path = tmp_path / "repository.json"
+    repository_metadata_path.write_text(
+        json.dumps(
+            {
+                "full_name": head_repository,
+                "fork": True,
+                "visibility": "public",
+                "parent": {"full_name": "onejumpinc/officeqa-pro-v2-agentbeats"},
+            }
+        )
+    )
+
+    verify_submission(
+        result_path=result_path,
+        provenance_path=provenance_path,
+        scenario_path=scenario_path,
+        source_scenario_path=source_scenario_path,
+        changed_files_path=changed_files_path,
+        run_metadata_path=run_metadata_path,
+        repository_metadata_path=repository_metadata_path,
+        head_repository=head_repository,
+        head_ref=f"submission-{unique_name}",
+        head_sha=result_sha,
+        base_repository="onejumpinc/officeqa-pro-v2-agentbeats",
+    )
+
+    run_metadata = json.loads(run_metadata_path.read_text())
+    run_metadata["conclusion"] = "failure"
+    run_metadata_path.write_text(json.dumps(run_metadata))
+    with pytest.raises(ValueError, match="did not complete successfully"):
+        verify_submission(
+            result_path=result_path,
+            provenance_path=provenance_path,
+            scenario_path=scenario_path,
+            source_scenario_path=source_scenario_path,
+            changed_files_path=changed_files_path,
+            run_metadata_path=run_metadata_path,
+            repository_metadata_path=repository_metadata_path,
+            head_repository=head_repository,
+            head_ref=f"submission-{unique_name}",
+            head_sha=result_sha,
+            base_repository="onejumpinc/officeqa-pro-v2-agentbeats",
+        )
