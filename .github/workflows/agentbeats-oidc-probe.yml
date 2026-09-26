@@ -1,0 +1,43 @@
+name: AgentBeats OIDC Compatibility Probe
+
+on:
+  pull_request:
+    types: [labeled]
+
+permissions: {}
+
+jobs:
+  probe:
+    if: >-
+      github.event.label.name == 'question' &&
+      github.event.pull_request.number == 1 &&
+      github.head_ref == 'quick-submit-01a0db99-f313-7910-b926-97a58d8c6f18'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: none
+    steps:
+      - name: Probe AgentBeats immutable OIDC support
+        shell: bash
+        env:
+          OIDC_AUDIENCE: agentbeats-quick-submit-production
+          SECRETS_URL: https://agentbeats.dev/api/quick-submit/01a0db99-f313-7910-b926-97a58d8c6f18/secrets
+        run: |
+          set -euo pipefail
+          oidc_response="$(curl -fsS \
+            -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${OIDC_AUDIENCE}")"
+          oidc_token="$(jq -r '.value' <<<"${oidc_response}")"
+          if [[ -z "${oidc_token}" || "${oidc_token}" == "null" ]]; then
+            echo "GitHub did not issue an OIDC token" >&2
+            exit 1
+          fi
+          echo "::add-mask::${oidc_token}"
+          http_code="$(curl -sS -o "${RUNNER_TEMP}/agentbeats-response.json" -w '%{http_code}' \
+            -H "Authorization: Bearer ${oidc_token}" "${SECRETS_URL}" || true)"
+          echo "AgentBeats secrets endpoint returned HTTP ${http_code}"
+          if [[ "${http_code}" == "401" ]]; then
+            echo "AgentBeats still rejects this repository's immutable GitHub OIDC subject" >&2
+            exit 1
+          fi
+          echo "AgentBeats accepted the immutable GitHub OIDC identity"
