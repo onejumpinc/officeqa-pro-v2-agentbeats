@@ -175,9 +175,12 @@ jobs:
       - name: Free disk space
         run: |
           echo "Before: $(df -h / | tail -1 | awk '{print $4}') free"
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /usr/local/share/chromium /usr/local/graalvm /opt/hostedtoolcache 2>/dev/null || true
-          sudo docker image prune -af 2>/dev/null || true
+          sudo timeout --signal=TERM --kill-after=15s 180s \
+            rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+              /usr/local/share/chromium /usr/local/graalvm \
+              /opt/hostedtoolcache 2>/dev/null || true
+          sudo timeout --signal=TERM --kill-after=15s 120s \
+            docker image prune -af 2>/dev/null || true
           echo "After: $(df -h / | tail -1 | awk '{print $4}') free"
 
       - name: Checkout exact release revision
