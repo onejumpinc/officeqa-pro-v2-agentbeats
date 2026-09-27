@@ -1,0 +1,113 @@
+{
+  "image_digests": {
+    "/gateway": "ghcr.io/rdi-foundation/agentbeats-gateway@sha256:3f9976889c598092dc4273312ec431cbc48bbe064ff65b5613425f4990bc1d4c",
+    "/officeqa_pro_v2_green": "ghcr.io/onejumpinc/officeqa-pro-v2-benchmark@sha256:79db435c4a563090391fcbc3b9b656850efc3a04746de6e20982c39702740ff7",
+    "/opencode_agent": "ghcr.io/onejumpinc/officeqa-proxy-agent@sha256:7a6d2d64b9a582b0a57460d13ecb5ef4641afdac8d71d864007c2ce7380ce8fa"
+  },
+  "framework_image_digests": {
+    "amber_control_curl": "curlimages/curl@sha256:94e9e444bcba979c2ea12e27ae39bee4cd10bc7041a472c4727a558e213744e6",
+    "amber_helper": "ghcr.io/rdi-foundation/amber-helper@sha256:135c9ec8b7ff5670d28a1b7b081571843e46605051ffea7adb36f5694265d905",
+    "amber_otelcol": "otel/opentelemetry-collector-contrib@sha256:3bc07732530c87c53f9103b01a3afed972fdeba26087a590c1098781736e58c2",
+    "amber_provisioner": "ghcr.io/rdi-foundation/amber-provisioner@sha256:c17f4496f5cd9750155224d79bfc35ff48ec215dd83e8031a8c75694c76cb113",
+    "amber_router": "ghcr.io/rdi-foundation/amber-router@sha256:5406fcb7c5d944f46c31b0131b37e14951fd7336fe71d24ee1a18b62f91e1482",
+    "busybox": "busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
+  },
+  "manifest_digests": {
+    "/": "sha256:9h8Jcoj5KKu0HraX5LQi9CfPS4cQW+FPIy0ccGiEsIY=",
+    "/gateway": "sha256:Ba99ymNGSymbrF9jGwLfnZaSnzPrw9sTJ5veaYMxV2Q=",
+    "/officeqa_pro_v2_green": "sha256:k05m8xoHnYoPwBfLrP2fhAa8ipVxIn+S4UuicaSJNvo=",
+    "/opencode_agent": "sha256:FqVrezifzyqnAacQEFw0fUNChsSTaeIEZ09JCLa7SRo="
+  },
+  "manifest_digests_by_shard": {
+    "0": {
+      "/": "sha256:9h8Jcoj5KKu0HraX5LQi9CfPS4cQW+FPIy0ccGiEsIY=",
+      "/gateway": "sha256:Ba99ymNGSymbrF9jGwLfnZaSnzPrw9sTJ5veaYMxV2Q=",
+      "/officeqa_pro_v2_green": "sha256:k05m8xoHnYoPwBfLrP2fhAa8ipVxIn+S4UuicaSJNvo=",
+      "/opencode_agent": "sha256:FqVrezifzyqnAacQEFw0fUNChsSTaeIEZ09JCLa7SRo="
+    },
+    "1": {
+      "/": "sha256:CRniHx1HAvgTEbbgrvQCH6bqatnAt9t+shgxy4UHKAg=",
+      "/gateway": "sha256:Ba99ymNGSymbrF9jGwLfnZaSnzPrw9sTJ5veaYMxV2Q=",
+      "/officeqa_pro_v2_green": "sha256:k05m8xoHnYoPwBfLrP2fhAa8ipVxIn+S4UuicaSJNvo=",
+      "/opencode_agent": "sha256:FqVrezifzyqnAacQEFw0fUNChsSTaeIEZ09JCLa7SRo="
+    },
+    "2": {
+      "/": "sha256:S5uGOblkA5pMcleuJvgDYegdEQo7G+T+qCpa4eLtKiA=",
+      "/gateway": "sha256:Ba99ymNGSymbrF9jGwLfnZaSnzPrw9sTJ5veaYMxV2Q=",
+      "/officeqa_pro_v2_green": "sha256:k05m8xoHnYoPwBfLrP2fhAa8ipVxIn+S4UuicaSJNvo=",
+      "/opencode_agent": "sha256:FqVrezifzyqnAacQEFw0fUNChsSTaeIEZ09JCLa7SRo="
+    },
+    "3": {
+      "/": "sha256:QGTg+BlMVVB6Q3zgPM9eARFsvuFoIrOsPgGxgKgXuOk=",
+      "/gateway": "sha256:Ba99ymNGSymbrF9jGwLfnZaSnzPrw9sTJ5veaYMxV2Q=",
+      "/officeqa_pro_v2_green": "sha256:k05m8xoHnYoPwBfLrP2fhAa8ipVxIn+S4UuicaSJNvo=",
+      "/opencode_agent": "sha256:FqVrezifzyqnAacQEFw0fUNChsSTaeIEZ09JCLa7SRo="
+    },
+    "4": {
+      "/": "sha256:bXbBaNaPtJVwk2flymzOdSs7h92P05DTJpQKzhmvKy0=",
+      "/gateway": "sha256:Ba99ymNGSymbrF9jGwLfnZaSnzPrw9sTJ5veaYMxV2Q=",
+      "/officeqa_pro_v2_green": "sha256:k05m8xoHnYoPwBfLrP2fhAa8ipVxIn+S4UuicaSJNvo=",
+      "/opencode_agent": "sha256:FqVrezifzyqnAacQEFw0fUNChsSTaeIEZ09JCLa7SRo="
+    },
+    "5": {
+      "/": "sha256:fu6Dl1CNzpyMVY2bB0Tlqf/zIDQ3ebCoWTTBc24mIdI=",
+      "/gateway": "sha256:Ba99ymNGSymbrF9jGwLfnZaSnzPrw9sTJ5veaYMxV2Q=",
+      "/officeqa_pro_v2_green": "sha256:k05m8xoHnYoPwBfLrP2fhAa8ipVxIn+S4UuicaSJNvo=",
+      "/opencode_agent": "sha256:FqVrezifzyqnAacQEFw0fUNChsSTaeIEZ09JCLa7SRo="
+    },
+    "6": {
+      "/": "sha256:P3IfMAyzsH5i5LCC+1eXyw5rggCTMJiiQMNg9vLD0jc=",
+      "/gateway": "sha256:Ba99ymNGSymbrF9jGwLfnZaSnzPrw9sTJ5veaYMxV2Q=",
+      "/officeqa_pro_v2_green": "sha256:k05m8xoHnYoPwBfLrP2fhAa8ipVxIn+S4UuicaSJNvo=",
+      "/opencode_agent": "sha256:FqVrezifzyqnAacQEFw0fUNChsSTaeIEZ09JCLa7SRo="
+    },
+    "7": {
+      "/": "sha256:c6UVjE1fXXMUYtQkTQwPMFzfbmEOvypeiuFCTYwE5Rc=",
+      "/gateway": "sha256:Ba99ymNGSymbrF9jGwLfnZaSnzPrw9sTJ5veaYMxV2Q=",
+      "/officeqa_pro_v2_green": "sha256:k05m8xoHnYoPwBfLrP2fhAa8ipVxIn+S4UuicaSJNvo=",
+      "/opencode_agent": "sha256:FqVrezifzyqnAacQEFw0fUNChsSTaeIEZ09JCLa7SRo="
+    },
+    "8": {
+      "/": "sha256:jQZc9LbIvu8s95Fx9VGEdFm7e+i+d2QtcBjA5U9hUeA=",
+      "/gateway": "sha256:Ba99ymNGSymbrF9jGwLfnZaSnzPrw9sTJ5veaYMxV2Q=",
+      "/officeqa_pro_v2_green": "sha256:k05m8xoHnYoPwBfLrP2fhAa8ipVxIn+S4UuicaSJNvo=",
+      "/opencode_agent": "sha256:FqVrezifzyqnAacQEFw0fUNChsSTaeIEZ09JCLa7SRo="
+    },
+    "9": {
+      "/": "sha256:r1GxKVW8esFOmAWxVcwZaA7z3BmZcdfEQKdkMs9gbXk=",
+      "/gateway": "sha256:Ba99ymNGSymbrF9jGwLfnZaSnzPrw9sTJ5veaYMxV2Q=",
+      "/officeqa_pro_v2_green": "sha256:k05m8xoHnYoPwBfLrP2fhAa8ipVxIn+S4UuicaSJNvo=",
+      "/opencode_agent": "sha256:FqVrezifzyqnAacQEFw0fUNChsSTaeIEZ09JCLa7SRo="
+    }
+  },
+  "release_manifests": {
+    "gateway": {
+      "raw_sha256": "0ef4afd064263eaacddf0fc93bb735fffce999491b96b2dccebb573f3847c6f9",
+      "url": "https://raw.githubusercontent.com/RDI-Foundation/agentbeats-gateway/ca6dd30904f98bfdfbff2f79fb035e854c93a8d3/amber-manifest.json5"
+    },
+    "green": {
+      "raw_sha256": "019d98d164d479c77724dda4c20809df0ad1229b97b097893d9a98909f577946",
+      "url": "https://raw.githubusercontent.com/onejumpinc/officeqa-pro-v2-agentbeats/9ac7f2c39d16e13b2e10ddb3f73c63cdc9d278ad/green-agent.json5"
+    },
+    "purple": {
+      "raw_sha256": "7175137be7a12305c47f0535f7ece1130dace1bc2537ebd0bcc849021579b4c5",
+      "url": "https://raw.githubusercontent.com/onejumpinc/officeqa-agentbeats/d376c66f2be259674704ae4cc71df1fe3c9b54ce/amber-manifest.json5"
+    }
+  },
+  "tool_images": {
+    "amber_cli": "ghcr.io/rdi-foundation/amber-cli@sha256:3514b6cf27896e8cc9a148e8ebdc96ae5a15fe36deec69b7250ab25e126511ca"
+  },
+  "results_sha256": "c44ca4d63673aceb674df053a6b0e1abebb5fe7eb7cd17196da645b8234a1fa9",
+  "timestamp": "2026-09-27T07:02:46Z",
+  "github_actions": {
+    "job_workflow_ref": "onejumpinc/officeqa-pro-v2-agentbeats/.github/workflows/run-scenario.yml@refs/heads/benchmark-feature",
+    "job_workflow_sha": "d343c61f23159dc53d199fb386abc6f8248911fd",
+    "ref": "refs/heads/benchmark-feature",
+    "repository_url": "https://github.com/onejumpinc/officeqa-pro-v2-agentbeats",
+    "run_attempt": 1,
+    "run_url": "https://github.com/onejumpinc/officeqa-pro-v2-agentbeats/actions/runs/36301753779",
+    "sha": "d343c61f23159dc53d199fb386abc6f8248911fd",
+    "workflow_ref": "onejumpinc/officeqa-pro-v2-agentbeats/.github/workflows/run-scenario.yml@refs/heads/benchmark-feature",
+    "workflow_sha": "d343c61f23159dc53d199fb386abc6f8248911fd"
+  }
+}
