@@ -787,6 +787,7 @@ def test_manual_workflow_is_hardened_feature_branch_or_fork_run() -> None:
     assert "git merge-base --is-ancestor" in workflow
     assert "Require canonical release controls and scenario" in workflow
     assert "shard_indices=[0,1,2,3,4,5,6,7,8,9]" in workflow
+    assert "timeout --signal=TERM --kill-after=15s 180s" in workflow
     assert "num_shards = 10" in workflow
     assert "--require-kind self-run" in workflow
     assert "--force-with-lease" in workflow
