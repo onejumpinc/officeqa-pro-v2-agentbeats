@@ -167,17 +167,19 @@ _GENERATED_ROOT_DIGESTS = (
     "sha256:ytTSdTEuOwHj6PynSLQ2WeEZLq3/d71mYDrYxnMraIY=",
     "sha256:an+gsMw/eXyuimzyDBojv8/NAamNdsFe33woJV/GH40=",
 )
+# Reproduced by all ten compile-only shards in public workflow run 36301019965
+# using the pinned Amber CLI and the three raw-SHA-verified release manifests.
 _SELF_RUN_ROOT_DIGESTS = (
-    "sha256:pptFjLMiNouuAUsBgAMR56nvLSqDXB6yiPeNEOUQQk0=",
-    "sha256:yQfKfGw0AZ+6WaNnyoU/e10ISLt7/rtyDkObCB0hY7I=",
-    "sha256:q4TJOjKXW8FTPvZD4kTn0M9dYz1p3e6JBwz6MZCHkzU=",
-    "sha256:nbUAK6HYJQGVKG/ZGtHgx4qe3OMh5e/ad9lRb4qAIYI=",
-    "sha256:0gvDIPfhn4yDU4JAsFUyllsbls5L0EAue+l8GS8sAtI=",
-    "sha256:BK/fbM0XvaQZBjTYCn/6NETDYmTy+713yweb/fosTCE=",
-    "sha256:gCmBLKiaqR3VBX3tIufokvvG2gBpHBeydtMZ+kLTTpE=",
-    "sha256:jTr0ujgBmyunhuUtGKMRCq9IQUVOxZZIGlXHYZ/ohFo=",
-    "sha256:9SGRbIhFaaBNK9yE2vUacEuQggrgwa5sleB3rivpjhI=",
-    "sha256:UGT+s+Gw4sNF8h/otEoYpaf013e2wLCNcKy4a3z6C40=",
+    "sha256:9h8Jcoj5KKu0HraX5LQi9CfPS4cQW+FPIy0ccGiEsIY=",
+    "sha256:CRniHx1HAvgTEbbgrvQCH6bqatnAt9t+shgxy4UHKAg=",
+    "sha256:S5uGOblkA5pMcleuJvgDYegdEQo7G+T+qCpa4eLtKiA=",
+    "sha256:QGTg+BlMVVB6Q3zgPM9eARFsvuFoIrOsPgGxgKgXuOk=",
+    "sha256:bXbBaNaPtJVwk2flymzOdSs7h92P05DTJpQKzhmvKy0=",
+    "sha256:fu6Dl1CNzpyMVY2bB0Tlqf/zIDQ3ebCoWTTBc24mIdI=",
+    "sha256:P3IfMAyzsH5i5LCC+1eXyw5rggCTMJiiQMNg9vLD0jc=",
+    "sha256:c6UVjE1fXXMUYtQkTQwPMFzfbmEOvypeiuFCTYwE5Rc=",
+    "sha256:jQZc9LbIvu8s95Fx9VGEdFm7e+i+d2QtcBjA5U9hUeA=",
+    "sha256:r1GxKVW8esFOmAWxVcwZaA7z3BmZcdfEQKdkMs9gbXk=",
 )
 
 
