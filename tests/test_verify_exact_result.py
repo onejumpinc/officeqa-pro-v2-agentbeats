@@ -392,6 +392,15 @@ def test_compiled_ir_and_runtime_images_are_exact() -> None:
             runtime_images=changed_images,
         )
 
+    changed_ir = json.loads(json.dumps(ir))
+    changed_ir["components"][0]["digest"] = "sha256:" + "A" * 43 + "="
+    with pytest.raises(ValueError, match=r"got=.*expected="):
+        verify_compiled_ir(
+            changed_ir,
+            scenario_kind="generated",
+            shard_index=shard_index,
+        )
+
 
 def test_compose_image_tags_are_replaced_by_exact_digests(tmp_path: Path) -> None:
     compose = tmp_path / "compose.yaml"
