@@ -1,4 +1,4 @@
-"""Verify a fork/self-run result PR without executing code from the fork."""
+"""Verify a feature-branch or fork result PR without executing source code."""
 
 from __future__ import annotations
 
@@ -81,14 +81,24 @@ def verify_submission(
         raise ValueError("manual result branch must start with submission-")
 
     repository = _object(_json(repository_metadata_path), "repository metadata")
-    parent = _object(repository.get("parent"), "repository parent")
     if (
         repository.get("full_name") != head_repository
-        or repository.get("fork") is not True
         or repository.get("visibility") != "public"
-        or parent.get("full_name") != base_repository
     ):
-        raise ValueError("submission head is not the expected public leaderboard fork")
+        raise ValueError("submission head is not an expected public repository")
+    feature_branch_route = head_repository == base_repository
+    if feature_branch_route:
+        if repository.get("fork") is not False:
+            raise ValueError("feature-branch submission repository must not be a fork")
+    else:
+        parent = _object(repository.get("parent"), "repository parent")
+        if (
+            repository.get("fork") is not True
+            or parent.get("full_name") != base_repository
+        ):
+            raise ValueError(
+                "submission head is not the expected public leaderboard fork"
+            )
 
     run = _object(_json(run_metadata_path), "workflow run metadata")
     run_repository = _object(run.get("repository"), "workflow run repository")
@@ -102,14 +112,17 @@ def verify_submission(
         raise ValueError("workflow run ID is invalid")
     if run_attempt != 1 or isinstance(run_attempt, bool):
         raise ValueError("manual workflow run_attempt must be exactly 1")
-    if run.get("event") not in {"push", "workflow_dispatch"}:
+    run_event = run.get("event")
+    if run_event not in {"push", "workflow_dispatch"}:
         raise ValueError("manual workflow event is not push or workflow_dispatch")
+    if feature_branch_route and run_event != "workflow_dispatch":
+        raise ValueError("feature-branch submission must use workflow_dispatch")
     if run.get("status") != "completed" or run.get("conclusion") != "success":
         raise ValueError("manual workflow run did not complete successfully")
     if run.get("path") != WORKFLOW_PATH:
         raise ValueError("manual workflow run used an unexpected workflow path")
     if run_repository.get("full_name") != head_repository:
-        raise ValueError("manual workflow run repository does not match the PR fork")
+        raise ValueError("manual workflow run repository does not match the PR head")
     if actor.get("login") != triggering_actor.get("login"):
         raise ValueError("manual workflow actor and triggering actor differ")
 
@@ -117,6 +130,8 @@ def verify_submission(
     run_head_branch = run.get("head_branch")
     if not isinstance(run_head_branch, str) or not run_head_branch:
         raise ValueError("manual workflow head branch is missing")
+    if run_head_branch == "main":
+        raise ValueError("manual workflow must run from a non-main branch")
     if not isinstance(run_head_sha, str) or not SHA_RE.fullmatch(run_head_sha):
         raise ValueError("manual workflow head SHA is invalid")
     if run.get("html_url") != (
@@ -213,7 +228,9 @@ def main() -> int:
     except (OSError, TypeError, json.JSONDecodeError, ValueError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1
-    print("PASS: canonical public fork run produced an exact 90/90 submission")
+    print(
+        "PASS: canonical feature-branch or public-fork run produced an exact 90/90 submission"
+    )
     return 0
 
 

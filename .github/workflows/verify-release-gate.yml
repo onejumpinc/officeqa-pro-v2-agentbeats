@@ -73,7 +73,7 @@ jobs:
           ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
 
-      - name: Fetch public result evidence without executing fork code
+      - name: Fetch public result evidence without executing source code
         id: evidence
         env:
           GH_TOKEN: ${{ github.token }}
@@ -137,13 +137,13 @@ jobs:
             output="${evidence_dir}/source-controls/${path//\//__}"
             fetch_content "${PR_HEAD_REPOSITORY}" "${path}" "${source_sha}" "${output}"
             if ! cmp --silent -- "${path}" "${output}"; then
-              echo "Fork run changed canonical release control: ${path}" >&2
+              echo "Source run changed canonical release control: ${path}" >&2
               exit 1
             fi
           done
           echo "evidence_dir=${evidence_dir}" >> "${GITHUB_OUTPUT}"
 
-      - name: Verify canonical fork run and exact 90/90 result
+      - name: Verify canonical feature-branch or fork run and exact 90/90 result
         env:
           EVIDENCE_DIR: ${{ steps.evidence.outputs.evidence_dir }}
           PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}

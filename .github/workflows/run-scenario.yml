@@ -1,4 +1,4 @@
-# Hardened fork/self-run path for the pinned OfficeQA Pro v2 90/90 release.
+# Hardened feature-branch route for the pinned OfficeQA Pro v2 90/90 release.
 
 name: Run Scenario
 
@@ -33,10 +33,11 @@ jobs:
       shard_indices: ${{ steps.matrix.outputs.shard_indices }}
       source_sha: ${{ steps.identity.outputs.source_sha }}
       source_ref: ${{ steps.identity.outputs.source_ref }}
+      submission_mode: ${{ steps.identity.outputs.submission_mode }}
       target_repository: ${{ steps.identity.outputs.target_repository }}
       target_sha: ${{ steps.canonical.outputs.target_sha }}
     steps:
-      - name: Require exact first-attempt public fork workflow identity
+      - name: Require exact first-attempt feature branch or public fork identity
         id: identity
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -52,7 +53,7 @@ jobs:
           set -euo pipefail
           target_repository='onejumpinc/officeqa-pro-v2-agentbeats'
           if [[ "${EVENT_NAME}" != "workflow_dispatch" && "${EVENT_NAME}" != "push" ]]; then
-            echo "The self-run accepts only a fork branch push or manual dispatch" >&2
+            echo "The self-run accepts only a branch push or manual dispatch" >&2
             exit 1
           fi
           if [[ "${RUN_ATTEMPT}" != "1" ||
@@ -62,25 +63,36 @@ jobs:
           fi
           if [[ ! "${EVENT_REF}" =~ ^refs/heads/[A-Za-z0-9._/-]+$ ||
                 "${EVENT_REF}" == "refs/heads/main" ]]; then
-            echo "The exact self-run must execute from a non-main fork branch" >&2
+            echo "The exact self-run must execute from a non-main branch" >&2
             exit 1
           fi
           expected_workflow_ref="${GITHUB_REPOSITORY}/.github/workflows/run-scenario.yml@${EVENT_REF}"
           if [[ "${WORKFLOW_REF}" != "${expected_workflow_ref}" ||
                 "${WORKFLOW_SHA}" != "${EVENT_SHA}" ||
                 ! "${EVENT_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "The exact self-run must execute the selected fork branch revision" >&2
+            echo "The exact self-run must execute the selected branch revision" >&2
             exit 1
           fi
           repository_json="$(gh api "repos/${GITHUB_REPOSITORY}")"
-          if ! jq -e --arg target "${target_repository}" '
+          if jq -e --arg target "${target_repository}" '
+            .full_name == $target and .fork == false and .visibility == "public"
+          ' <<<"${repository_json}" >/dev/null; then
+            if [[ "${EVENT_NAME}" != "workflow_dispatch" ]]; then
+              echo "The feature-branch route requires manual dispatch" >&2
+              exit 1
+            fi
+            submission_mode='feature-branch'
+          elif jq -e --arg target "${target_repository}" '
             .fork == true and .visibility == "public" and .parent.full_name == $target
           ' <<<"${repository_json}" >/dev/null; then
-            echo "The exact self-run requires a public fork of ${target_repository}" >&2
+            submission_mode='public-fork'
+          else
+            echo "The exact self-run requires the canonical public repository or its public fork" >&2
             exit 1
           fi
           echo "source_sha=${EVENT_SHA}" >> "${GITHUB_OUTPUT}"
           echo "source_ref=${EVENT_REF}" >> "${GITHUB_OUTPUT}"
+          echo "submission_mode=${submission_mode}" >> "${GITHUB_OUTPUT}"
           echo "target_repository=${target_repository}" >> "${GITHUB_OUTPUT}"
 
       - name: Checkout exact release revision
@@ -367,9 +379,9 @@ jobs:
 
       - name: Stage exact benchmark secrets
         env:
-          GREEN_HF_TOKEN: ${{ secrets.GREEN_HF_TOKEN }}
-          PARTICIPANT_API_URL: ${{ secrets.PARTICIPANT_API_URL }}
-          PARTICIPANT_API_TOKEN: ${{ secrets.PARTICIPANT_API_TOKEN }}
+          GREEN_HF_TOKEN: ${{ secrets.GREEN_HF_TOKEN || secrets.OFFICEQA_PRO_V2_HF_TOKEN }}
+          PARTICIPANT_API_URL: ${{ secrets.PARTICIPANT_API_URL || vars.PARTICIPANT_API_URL || 'https://api.onejumpinc.com' }}
+          PARTICIPANT_API_TOKEN: ${{ secrets.PARTICIPANT_API_TOKEN || secrets.OFFICEQA_API_TOKEN }}
           SECRET_ENV_FILE: ${{ runner.temp }}/benchmark.env
         run: |
           set -euo pipefail
@@ -646,6 +658,7 @@ jobs:
     env:
       SOURCE_SHA: ${{ needs.setup.outputs.source_sha }}
       SOURCE_REF: ${{ needs.setup.outputs.source_ref }}
+      SUBMISSION_MODE: ${{ needs.setup.outputs.submission_mode }}
       TARGET_REPOSITORY: ${{ needs.setup.outputs.target_repository }}
       TARGET_SHA: ${{ needs.setup.outputs.target_sha }}
     steps:
@@ -760,7 +773,7 @@ jobs:
 
       - name: Fetch pinned release dataset
         env:
-          HF_TOKEN: ${{ secrets.GREEN_HF_TOKEN }}
+          HF_TOKEN: ${{ secrets.GREEN_HF_TOKEN || secrets.OFFICEQA_PRO_V2_HF_TOKEN }}
         run: |
           set -euo pipefail
           if [[ -z "${HF_TOKEN}" || "${HF_TOKEN}" == *$'\n'* || "${HF_TOKEN}" == *$'\r'* ]]; then
@@ -859,9 +872,16 @@ jobs:
           BRANCH_NAME: ${{ steps.result-commit.outputs.branch_name }}
         run: |
           set -euo pipefail
-          fork_repository_name="${GITHUB_REPOSITORY#*/}"
           compare_url="${GITHUB_SERVER_URL}/${TARGET_REPOSITORY}/compare/"
-          compare_url+="main...${GITHUB_REPOSITORY_OWNER}:${fork_repository_name}:${BRANCH_NAME}?expand=1"
+          if [[ "${SUBMISSION_MODE}" == "feature-branch" ]]; then
+            compare_url+="main...${BRANCH_NAME}?expand=1"
+          elif [[ "${SUBMISSION_MODE}" == "public-fork" ]]; then
+            fork_repository_name="${GITHUB_REPOSITORY#*/}"
+            compare_url+="main...${GITHUB_REPOSITORY_OWNER}:${fork_repository_name}:${BRANCH_NAME}?expand=1"
+          else
+            echo "Unexpected submission mode: ${SUBMISSION_MODE}" >&2
+            exit 1
+          fi
           {
             echo "### Verified 90/90 submission"
             echo
