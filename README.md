@@ -7,10 +7,10 @@ the release verifier.
 
 Two official public execution paths are enabled. Quick Submit uses AgentBeats'
 required official v2 reusable runner and receives participant secrets from the
-encrypted AgentBeats submission bundle. The hardened fork/self-run path uses
-only secrets owned by the submitter's public fork, runs the same exact 10-shard
-release, and opens an upstream result pull request after the 90/90 verifier
-passes.
+encrypted AgentBeats submission bundle. The hardened feature-branch route uses
+repository Actions secrets, runs the same exact 10-shard release, and opens a
+result pull request after the 90/90 verifier passes. A public-fork variant is
+also available for external submitters.
 
 ## Current release state
 
@@ -82,9 +82,9 @@ Configure these controls outside the workflow:
    review for `.github/workflows/**`, `tools/**`, `scenario.json5`, `results/**`,
    and `submissions/**`. Disable force-push, deletion, and admin bypass.
 3. Permit the GitHub Actions bot to update only the expected `quick-submit-*`
-   branch. A fork/self-run pushes its generated `submission-*` branch only to
-   the submitter's fork. Compare-and-swap leases prevent overwriting an
-   unexpected branch state.
+   and `submission-*` branches. A manual run pushes its generated
+   `submission-*` branch only to the repository where it ran. Compare-and-swap
+   leases prevent overwriting an unexpected branch state.
 4. Install the AgentBeats GitHub App with minimum repository permissions. It
    must not have Actions/workflow-dispatch permission beyond what the service
    explicitly requires.
@@ -100,14 +100,16 @@ request with GitHub OIDC.
 ## Secret boundary
 
 Quick Submit obtains participant secrets from AgentBeats' encrypted,
-submission-scoped bundle. The fork/self-run route does not call AgentBeats'
-Quick Submit secrets endpoint and cannot read secrets from this upstream
-repository. Each submitter stores these three Actions secrets in their own
-fork:
+submission-scoped bundle. The feature-branch route does not call AgentBeats'
+Quick Submit secrets endpoint. It accepts these Actions secrets:
 
-- `GREEN_HF_TOKEN`
-- `PARTICIPANT_API_URL`
-- `PARTICIPANT_API_TOKEN`
+- `GREEN_HF_TOKEN` or `OFFICEQA_PRO_V2_HF_TOKEN`
+- `PARTICIPANT_API_URL` (defaults to `https://api.onejumpinc.com`)
+- `PARTICIPANT_API_TOKEN` or `OFFICEQA_API_TOKEN`
+
+For the feature-branch route, store them in this repository. For the public-fork
+variant, each submitter stores them in their fork; fork workflows cannot read
+secrets from this repository.
 
 The workflow validates and masks the values, writes them to a mode-0600
 temporary env file, deletes that file immediately after container startup, and
@@ -134,34 +136,39 @@ validate, at minimum:
 The workflow's own claim checks are defense in depth; the backend and WIF
 attribute conditions are the actual authorization boundary.
 
-## Hardened fork/self-run submission
+## Hardened feature-branch submission
 
-The manual route follows AgentBeats' official fork workflow while retaining the
-OfficeQA exact-release controls:
+The feature-branch route retains the OfficeQA exact-release controls while
+allowing the official manual workflow to run directly from this repository:
 
-1. Create a **public fork** of this repository and enable read/write Workflow
-   permissions in the fork's Actions settings.
-2. Sync the fork with current upstream `main`, create a non-`main` branch, and
-   add the three fork-owned secrets listed above.
+1. Create a non-`main` feature branch at current `main`. The branch must remain
+   current with `main`, and its workflow and release-control files must be
+   byte-for-byte identical to `main`.
+2. Add the Actions secrets listed above and enable read/write Workflow
+   permissions in the repository's Actions settings.
 3. Keep `scenario.json5` on the approved OfficeQA Pro v2 topology and registered
    participant. The verifier rejects partial runs, alternate images, changed
    release controls, and unapproved participant identities.
-4. Run **Run Scenario** with `workflow_dispatch` while the non-`main` branch is
-   selected. A push changing `scenario.json5` on a non-`main` branch also
-   triggers it.
+4. In **Actions → Run Scenario**, choose **Run workflow**, select the feature
+   branch, and dispatch it. Push events are rejected for this route.
 5. Ten shards start concurrently. The workflow aggregates only ten completed
    shards, checks all 90 pinned tasks, requires 90/90 with zero errors, and
    records immutable image, manifest, tool, workflow, and result hashes.
 6. After verification, use the Actions summary link to open the generated
-   `submission-<owner>-<run-id>` branch as a pull request to upstream `main`.
-   Leave **Allow edits and access to secrets by maintainers** unchecked.
+   `submission-<source>-<run-id>` branch as a pull request to `main`.
+
+External submitters can instead use the public-fork variant: sync a public fork,
+create a non-`main` branch, add fork-owned secrets, and dispatch **Run Scenario**
+there. A `scenario.json5` change pushed to that fork branch can also trigger the
+run. Leave **Allow edits and access to secrets by maintainers** unchecked on the
+result PR.
 
 The upstream `Verify Release Gate` checks that the PR adds exactly
 `results/<submission>.json`, `submissions/<submission>.json5`, and
 `submissions/<submission>-provenance.json`. It retrieves the referenced public
 Actions run, requires a successful first attempt, compares the run's workflow
-and release tools byte-for-byte with trusted upstream files, and re-validates
-the exact result and provenance without executing code from the fork.
+and release tools byte-for-byte with trusted files, and re-validates the exact
+result and provenance without executing code from the source branch.
 
 ## Local validation
 

@@ -725,9 +725,18 @@ def test_public_workflows_gate_before_any_result_write() -> None:
     assert ".release-gate/tools/fetch_pinned_dataset.py" in quick_run
     assert all("${{" not in block for block in _workflow_run_blocks(manual_run))
     assert "agentbeats.dev/api/quick-submit" not in manual_run
-    assert "GREEN_HF_TOKEN: ${{ secrets.GREEN_HF_TOKEN }}" in manual_run
-    assert "PARTICIPANT_API_URL: ${{ secrets.PARTICIPANT_API_URL }}" in manual_run
-    assert "PARTICIPANT_API_TOKEN: ${{ secrets.PARTICIPANT_API_TOKEN }}" in manual_run
+    assert (
+        "GREEN_HF_TOKEN: ${{ secrets.GREEN_HF_TOKEN || "
+        "secrets.OFFICEQA_PRO_V2_HF_TOKEN }}" in manual_run
+    )
+    assert (
+        "PARTICIPANT_API_URL: ${{ secrets.PARTICIPANT_API_URL || "
+        "vars.PARTICIPANT_API_URL || 'https://api.onejumpinc.com' }}" in manual_run
+    )
+    assert (
+        "PARTICIPANT_API_TOKEN: ${{ secrets.PARTICIPANT_API_TOKEN || "
+        "secrets.OFFICEQA_API_TOKEN }}" in manual_run
+    )
 
 
 def test_working_runner_matches_the_immutable_caller_pin() -> None:
@@ -755,14 +764,16 @@ def test_quick_submit_calls_agentbeats_v2_runner() -> None:
     assert "secrets." not in workflow
 
 
-def test_manual_workflow_is_hardened_fork_self_run() -> None:
+def test_manual_workflow_is_hardened_feature_branch_or_fork_run() -> None:
     workflow = (ROOT / ".github/workflows/run-scenario.yml").read_text()
     trigger = workflow.split("env:", maxsplit=1)[0]
     assert "\n  push:\n" in trigger
     assert "\n  workflow_dispatch:\n" in trigger
     assert "branches-ignore:" in trigger
     assert "- main" in trigger
-    assert "public fork of ${target_repository}" in workflow
+    assert "The feature-branch route requires manual dispatch" in workflow
+    assert "submission_mode='feature-branch'" in workflow
+    assert ".full_name == $target and .fork == false" in workflow
     assert ".parent.full_name == $target" in workflow
     assert "git merge-base --is-ancestor" in workflow
     assert "Require canonical release controls and scenario" in workflow
@@ -774,19 +785,26 @@ def test_manual_workflow_is_hardened_fork_self_run() -> None:
     assert "environment: officeqa-production" not in workflow
 
 
-def test_manual_submission_evidence_passes(tmp_path: Path) -> None:
+@pytest.mark.parametrize("route", ["feature-branch", "public-fork"])
+def test_manual_submission_evidence_passes(tmp_path: Path, route: str) -> None:
     dataset_path, rows = _dataset(tmp_path)
     del dataset_path
     scenario = _scenario()
     artifact = _artifact(rows)
     artifact["participants"] = scenario["metadata"]["agentbeats_ids"]
 
-    head_repository = "forker/officeqa-pro-v2-agentbeats"
+    feature_branch_route = route == "feature-branch"
+    head_repository = (
+        "onejumpinc/officeqa-pro-v2-agentbeats"
+        if feature_branch_route
+        else "forker/officeqa-pro-v2-agentbeats"
+    )
     source_branch = "benchmark"
     source_sha = "a" * 40
     result_sha = "b" * 40
     run_id = 123
-    unique_name = f"forker-{run_id}"
+    source_owner = "onejumpinc" if feature_branch_route else "forker"
+    unique_name = f"{source_owner}-{run_id}"
     run_url = f"https://github.com/{head_repository}/actions/runs/{run_id}"
     workflow_ref = (
         f"{head_repository}/.github/workflows/run-scenario.yml@"
@@ -842,8 +860,8 @@ def test_manual_submission_evidence_passes(tmp_path: Path) -> None:
                 "conclusion": "success",
                 "path": ".github/workflows/run-scenario.yml",
                 "repository": {"full_name": head_repository},
-                "actor": {"login": "forker"},
-                "triggering_actor": {"login": "forker"},
+                "actor": {"login": source_owner},
+                "triggering_actor": {"login": source_owner},
                 "head_sha": source_sha,
                 "head_branch": source_branch,
                 "html_url": run_url,
@@ -851,16 +869,16 @@ def test_manual_submission_evidence_passes(tmp_path: Path) -> None:
         )
     )
     repository_metadata_path = tmp_path / "repository.json"
-    repository_metadata_path.write_text(
-        json.dumps(
-            {
-                "full_name": head_repository,
-                "fork": True,
-                "visibility": "public",
-                "parent": {"full_name": "onejumpinc/officeqa-pro-v2-agentbeats"},
-            }
-        )
-    )
+    repository_metadata = {
+        "full_name": head_repository,
+        "fork": not feature_branch_route,
+        "visibility": "public",
+    }
+    if not feature_branch_route:
+        repository_metadata["parent"] = {
+            "full_name": "onejumpinc/officeqa-pro-v2-agentbeats"
+        }
+    repository_metadata_path.write_text(json.dumps(repository_metadata))
 
     verify_submission(
         result_path=result_path,
@@ -893,3 +911,22 @@ def test_manual_submission_evidence_passes(tmp_path: Path) -> None:
             head_sha=result_sha,
             base_repository="onejumpinc/officeqa-pro-v2-agentbeats",
         )
+
+    if feature_branch_route:
+        run_metadata["conclusion"] = "success"
+        run_metadata["event"] = "push"
+        run_metadata_path.write_text(json.dumps(run_metadata))
+        with pytest.raises(ValueError, match="must use workflow_dispatch"):
+            verify_submission(
+                result_path=result_path,
+                provenance_path=provenance_path,
+                scenario_path=scenario_path,
+                source_scenario_path=source_scenario_path,
+                changed_files_path=changed_files_path,
+                run_metadata_path=run_metadata_path,
+                repository_metadata_path=repository_metadata_path,
+                head_repository=head_repository,
+                head_ref=f"submission-{unique_name}",
+                head_sha=result_sha,
+                base_repository="onejumpinc/officeqa-pro-v2-agentbeats",
+            )
