@@ -883,7 +883,9 @@ def verify_compiled_ir(
     expected_manifests = _expected_manifest_digests(scenario_kind)[str(shard_index)]
     if manifest_digests != expected_manifests:
         raise ValueError(
-            "compiled IR manifest digests differ from the exact release shard"
+            "compiled IR manifest digests differ from the exact release shard: "
+            f"got={json.dumps(manifest_digests, sort_keys=True, separators=(',', ':'))} "
+            f"expected={json.dumps(expected_manifests, sort_keys=True, separators=(',', ':'))}"
         )
     if compiled_images != _expected_compiled_images(scenario_kind):
         raise ValueError("compiled IR program images differ from the exact release set")
