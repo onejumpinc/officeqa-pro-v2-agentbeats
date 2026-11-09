@@ -1,6 +1,5 @@
 {
   manifest_version: "0.1.0",
-
   config_schema: {
     type: "object",
     properties: {
@@ -9,30 +8,26 @@
     required: ["hf_token"],
     additionalProperties: false,
   },
-
   slots: {
     proxy: { kind: "a2a" },
   },
-
   program: {
-    image: "ghcr.io/onejumpinc/officeqa-pro-v2-benchmark@sha256:79db435c4a563090391fcbc3b9b656850efc3a04746de6e20982c39702740ff7",
+    // Immutable production image built from revision 59b6c681, whose shipped
+    // scorer is pinned by the 739 evaluator-parity tests.
+    image: "ghcr.io/onejumpinc/officeqa-pro-v2-benchmark@sha256:aaf5f408a99b02478b95f555ec96b2b4d420d996f0fb8cf77a9d9fcb31dcd124",
     entrypoint: "python server.py --host 0.0.0.0 --port 9009",
     env: {
       HF_TOKEN: "${config.hf_token}",
       AMBER_HINT_PROXY: "${slots.proxy}",
-      OFFICEQA_SCORER_PARITY: "0",
-      PYTHONUNBUFFERED: "1",
     },
     network: {
       endpoints: [{ name: "a2a_endpoint", port: 9009 }],
     },
   },
-
   provides: {
     a2a: { kind: "a2a", endpoint: "a2a_endpoint" },
   },
   exports: { a2a: "a2a" },
-
   metadata: {
     assessment_config: {
       tolerance: 0.0,
